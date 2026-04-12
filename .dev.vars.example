@@ -1,0 +1,7 @@
+FREEAGENT_CLIENT_ID=your-freeagent-client-id
+FREEAGENT_CLIENT_SECRET=your-freeagent-client-secret
+TOKEN_ENCRYPTION_KEY=your-32-byte-encryption-key
+WORKER_BASE_URL=http://127.0.0.1:8787
+FREEAGENT_MODE=company
+FREEAGENT_API_BASE_URL=https://api.freeagent.com
+FREEAGENT_USER_AGENT=freeagent-mcp/0.1.0

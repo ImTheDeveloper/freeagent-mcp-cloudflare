@@ -1,0 +1,44 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mcp-freeagent",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["FreeAgentMCP"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["AuthStore"]
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MCP_OBJECT",
+        "class_name": "FreeAgentMCP"
+      },
+      {
+        "name": "AUTH_STORE",
+        "class_name": "AuthStore"
+      }
+    ]
+  },
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "YOUR_OAUTH_KV_NAMESPACE_ID"
+    }
+  ],
+  "vars": {
+    "WORKER_BASE_URL": "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev",
+    "FREEAGENT_MODE": "company",
+    "FREEAGENT_API_BASE_URL": "https://api.freeagent.com",
+    "FREEAGENT_USER_AGENT": "freeagent-mcp/0.1.0"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

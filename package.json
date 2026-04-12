@@ -1,0 +1,47 @@
+{
+  "name": "mcp-freeagent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Remote MCP server for read-only FreeAgent analysis on Cloudflare Workers.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "smoke:company": "node scripts/live-company-smoke.mjs",
+    "lint": "oxlint .",
+    "lint:fix": "oxlint --fix .",
+    "format": "oxfmt --write ."
+  },
+  "keywords": [
+    "freeagent",
+    "mcp",
+    "cloudflare-workers"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.20.0"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.4.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "agents": "^0.10.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.14.3",
+    "@types/node": "^25.6.0",
+    "oxfmt": "^0.44.0",
+    "oxlint": "^1.59.0",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.4",
+    "wrangler": "^4.81.1"
+  },
+  "overrides": {
+    "path-to-regexp": "8.4.0"
+  }
+}
