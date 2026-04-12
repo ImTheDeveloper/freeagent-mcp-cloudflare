@@ -107,7 +107,8 @@ Rules for LLM agents:
 
 ## Connect From Claude Or ChatGPT
 
-1. Add your MCP URL in client settings.
+1. Add your MCP URL in client settings:
+   `https://<worker-name>.<subdomain>.workers.dev/mcp`
 2. Complete FreeAgent consent in the browser.
 3. In chat, run `auth_status` or `get_company`.
 4. In practice mode, use `list_clients` and `switch_client` to choose an active client.
