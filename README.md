@@ -128,3 +128,5 @@ Rules for LLM agents:
 - Sandbox notes: `Project/freeagent-mcp-implementation/sandbox-notes.md`
 - Secret management: `Project/freeagent-mcp-implementation/secret-management.md`
 - Security policy: `SECURITY.md`
+- Contribution guide: `CONTRIBUTING.md`
+- License: `LICENSE`
