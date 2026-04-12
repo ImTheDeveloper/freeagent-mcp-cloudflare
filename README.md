@@ -127,3 +127,4 @@ Rules for LLM agents:
 - Deployment modes: `Project/freeagent-mcp-implementation/deployment-modes.md`
 - Sandbox notes: `Project/freeagent-mcp-implementation/sandbox-notes.md`
 - Secret management: `Project/freeagent-mcp-implementation/secret-management.md`
+- Security policy: `SECURITY.md`
