@@ -25,6 +25,8 @@ export function buildInvoicesPath(
     SortQueryOptions & {
       view?: string;
       includeItems?: boolean;
+      contact?: string;
+      project?: string;
     },
 ): string {
   return buildPathWithQuery("/v2/invoices", {
@@ -32,7 +34,11 @@ export function buildInvoicesPath(
     per_page: options?.perPage,
     view: options?.view,
     sort: options?.sort,
+    from_date: options?.fromDate,
+    to_date: options?.toDate,
     updated_since: options?.updatedSince,
+    contact: options?.contact,
+    project: options?.project,
     nested_invoice_items: options?.includeItems ? true : undefined,
   });
 }
@@ -183,6 +189,27 @@ export function buildBankTransactionsPath(
     updated_since: options.updatedSince,
     last_uploaded: options.lastUploaded ? true : undefined,
   });
+}
+
+/**
+ * Resolves a bank account reference that needs no API lookup.
+ *
+ * FreeAgent's `bank_account` filter only accepts a full resource URL, so a bare
+ * id is expanded here. Returns null when the reference is a nominal code or
+ * name and has to be matched against the account list instead.
+ */
+export function resolveDirectBankAccountRef(ref: string, apiBaseUrl: string): string | null {
+  const trimmed = ref.trim();
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  if (/^\d+$/.test(trimmed)) {
+    return `${apiBaseUrl.replace(/\/+$/, "")}/v2/bank_accounts/${trimmed}`;
+  }
+
+  return null;
 }
 
 export function buildBankTransactionPath(id: string): string {

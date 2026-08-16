@@ -12,6 +12,11 @@ node_modules/
 wrangler.local.jsonc
 wrangler.*.local.jsonc
 
+# Real deploy config: account-specific KV ids and worker URL.
+# Copy wrangler.jsonc.example to wrangler.jsonc and fill in your own values.
+wrangler.jsonc
+!wrangler.jsonc.example
+
 # Build and generated artifacts
 coverage/
 dist/

@@ -13,6 +13,7 @@ import {
   buildRecurringInvoicesPath,
   buildTransactionPath,
   buildTransactionsPath,
+  resolveDirectBankAccountRef,
 } from "../src/freeagent/resources";
 
 describe("freeagent operational resource helpers", () => {
@@ -34,6 +35,46 @@ describe("freeagent operational resource helpers", () => {
     expect(buildCreditNotesPath({ includeItems: true, view: "draft" })).toBe(
       "/v2/credit_notes?view=draft&nested_credit_note_items=true",
     );
+  });
+
+  it("passes invoice date, contact, and project filters through to the query", () => {
+    expect(
+      buildInvoicesPath({
+        fromDate: "2025-04-01",
+        toDate: "2026-03-31",
+        sort: "-created_at",
+      }),
+    ).toBe("/v2/invoices?sort=-created_at&from_date=2025-04-01&to_date=2026-03-31");
+
+    expect(
+      buildInvoicesPath({
+        contact: "https://api.freeagent.com/v2/contacts/7",
+        project: "https://api.freeagent.com/v2/projects/2",
+      }),
+    ).toBe(
+      "/v2/invoices?contact=https%3A%2F%2Fapi.freeagent.com%2Fv2%2Fcontacts%2F7&project=https%3A%2F%2Fapi.freeagent.com%2Fv2%2Fprojects%2F2",
+    );
+  });
+
+  it("resolves bank account references that need no lookup", () => {
+    const base = "https://api.freeagent.com";
+
+    expect(resolveDirectBankAccountRef("https://api.freeagent.com/v2/bank_accounts/1", base)).toBe(
+      "https://api.freeagent.com/v2/bank_accounts/1",
+    );
+    // A bare id is the case that used to 404, because the filter needs a full URL.
+    expect(resolveDirectBankAccountRef("123", base)).toBe(
+      "https://api.freeagent.com/v2/bank_accounts/123",
+    );
+    expect(resolveDirectBankAccountRef(" 123 ", base)).toBe(
+      "https://api.freeagent.com/v2/bank_accounts/123",
+    );
+    expect(resolveDirectBankAccountRef("123", "https://api.freeagent.com/")).toBe(
+      "https://api.freeagent.com/v2/bank_accounts/123",
+    );
+    // Nominal codes and names need the account list, so they defer to a lookup.
+    expect(resolveDirectBankAccountRef("750-1", base)).toBeNull();
+    expect(resolveDirectBankAccountRef("Business Current", base)).toBeNull();
   });
 
   it("builds estimates, bills, expenses, recurring invoices, and transactions paths", () => {

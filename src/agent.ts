@@ -1,10 +1,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent, getMcpAuthContext } from "agents/mcp";
 import { z } from "zod";
-import { getFreeAgentMode, type AppEnv } from "./env";
+import { getFreeAgentApiBaseUrl, getFreeAgentMode, type AppEnv } from "./env";
 import { getPrincipalAuthRecord, patchPrincipalAuthRecord } from "./auth/store";
 import { bootstrapAccountContext, switchActiveClientContext } from "./freeagent/context";
-import { freeAgentGet, freeAgentGetDetailed } from "./freeagent/api";
+import {
+  buildTruncationNotice,
+  countCollectionItems,
+  freeAgentGet,
+  freeAgentGetAllPages,
+  freeAgentGetDetailed,
+} from "./freeagent/api";
 import { formatFreeAgentErrorMessage } from "./freeagent/errors";
 import {
   buildBalanceSheetPath,
@@ -43,6 +49,7 @@ import {
   buildProjectsPath,
   buildRecurringInvoicePath,
   buildRecurringInvoicesPath,
+  resolveDirectBankAccountRef,
   buildTaskPath,
   buildTasksPath,
   buildTransactionPath,
@@ -53,19 +60,27 @@ import {
   buildUsersPath,
 } from "./freeagent/resources";
 import { ensureValidAccessToken } from "./freeagent/token";
+import {
+  registerOptionalTool,
+  type OptionalArgsShape,
+  type TextToolResponse,
+} from "./mcp/register-tools";
 import { DEFAULT_SESSION_STATE, type SessionState } from "./types";
 
-type TextToolResponse = {
-  content: Array<{
-    type: "text";
-    text: string;
-  }>;
-};
-
 const SESSION_INACTIVITY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const pageParam = z.number().int().positive().optional();
-const perPageParam = z.number().int().positive().max(100).optional();
-type OptionalArgsShape = z.ZodRawShape;
+const pageParam = z
+  .number()
+  .int()
+  .positive()
+  .optional()
+  .describe("1-based page number. Defaults to 1.");
+const perPageParam = z
+  .number()
+  .int()
+  .positive()
+  .max(100)
+  .optional()
+  .describe("Records per page, 1-100. Defaults to 25, so pass 100 to reduce paging.");
 
 export class FreeAgentMCP extends McpAgent<any, SessionState> {
   server = new McpServer({
@@ -179,43 +194,46 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
 
     this.registerOptionalTool(
       "get_balance_sheet",
-      { asAtDate: z.string().optional() },
+      { asAtDate: z.string().optional().describe("YYYY-MM-DD. Defaults to today.") },
       async ({ asAtDate }) =>
-        this.readOnlyToolCall(
+        this.readOnlyAggregatedToolCall(
           buildBalanceSheetPath({ asAtDate }),
           "Failed to get balance sheet",
         ),
+      "Balance sheet as at a date. All rows are fetched and concatenated.",
     );
 
     this.registerOptionalTool(
       "get_profit_and_loss",
       {
-        fromDate: z.string().optional(),
-        toDate: z.string().optional(),
-        accountingPeriod: z.string().optional(),
+        fromDate: z.string().optional().describe("YYYY-MM-DD."),
+        toDate: z.string().optional().describe("YYYY-MM-DD."),
+        accountingPeriod: z.string().optional().describe("e.g. 2022/23."),
       },
       async ({ fromDate, toDate, accountingPeriod }) =>
-        this.readOnlyToolCall(
+        this.readOnlyAggregatedToolCall(
           buildProfitAndLossSummaryPath({ fromDate, toDate, accountingPeriod }),
           "Failed to get profit and loss summary",
         ),
+      "Profit and loss summary. Date ranges must be 12 months or less and within one accounting year. All rows are fetched and concatenated.",
     );
 
     this.registerOptionalTool(
       "get_trial_balance_summary",
       {
-        fromDate: z.string().optional(),
-        toDate: z.string().optional(),
+        fromDate: z.string().optional().describe("YYYY-MM-DD."),
+        toDate: z.string().optional().describe("YYYY-MM-DD."),
       },
       async ({ fromDate, toDate }) =>
-        this.readOnlyToolCall(
+        this.readOnlyAggregatedToolCall(
           buildTrialBalanceSummaryPath({ fromDate, toDate }),
           "Failed to get trial balance summary",
         ),
+      "Full trial balance for the period. Every nominal code is fetched and concatenated, so the result is complete rather than a first page.",
     );
 
     this.server.tool("get_trial_balance_opening_balances", async () =>
-      this.readOnlyToolCall(
+      this.readOnlyAggregatedToolCall(
         "/v2/accounting/trial_balance/summary/opening_balances",
         "Failed to get trial balance opening balances",
       ),
@@ -252,14 +270,14 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
       ),
     );
 
-    this.server.tool(
+    this.server.registerTool(
       "get_final_accounts_report",
-      { periodEndsOn: z.string().min(1) },
-      async ({ periodEndsOn }) =>
-        this.readOnlyToolCall(
-          buildFinalAccountsReportPath(periodEndsOn),
-          "Failed to get final accounts report",
-        ),
+      {
+        description:
+          "Filing metadata for an accounting period (dates, filing status, filed reference). This FreeAgent resource carries NO financial figures — for prior-year numbers use get_profit_and_loss, get_balance_sheet, or get_trial_balance_summary with the period dates returned here.",
+        inputSchema: { periodEndsOn: z.string().min(1).describe("YYYY-MM-DD period end date.") },
+      },
+      async ({ periodEndsOn }) => this.getFinalAccountsReport(periodEndsOn),
     );
 
     this.server.tool("get_company_tax_timeline", async () =>
@@ -271,16 +289,36 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
       {
         page: pageParam,
         perPage: perPageParam,
-        view: z.string().optional(),
-        sort: z.string().optional(),
+        view: z.string().optional().describe(
+          "all (default), recent_open_or_overdue, open, overdue, open_or_overdue, draft, paid, last_N_months.",
+        ),
+        sort: z.string().optional().describe(
+          "Defaults to -created_at (newest first). Prefix with '-' to reverse. Documented values: created_at, updated_at.",
+        ),
+        fromDate: z.string().optional().describe("YYYY-MM-DD."),
+        toDate: z.string().optional().describe("YYYY-MM-DD."),
         updatedSince: z.string().optional(),
+        contact: z.string().optional().describe("Contact resource URL."),
+        project: z.string().optional().describe("Project resource URL."),
         includeItems: z.boolean().optional(),
       },
-      async ({ page, perPage, view, sort, updatedSince, includeItems }) =>
+      async ({ page, perPage, view, sort, fromDate, toDate, updatedSince, contact, project, includeItems }) =>
         this.readOnlyListToolCall(
-          buildInvoicesPath({ page, perPage, view, sort, updatedSince, includeItems }),
+          buildInvoicesPath({
+            page,
+            perPage,
+            view,
+            sort: sort ?? "-created_at",
+            fromDate,
+            toDate,
+            updatedSince,
+            contact,
+            project,
+            includeItems,
+          }),
           "Failed to list invoices",
         ),
+      "Lists invoices, newest first by default. Paginated: check the `truncation` field in the response and page through it before drawing conclusions.",
     );
 
     this.server.tool(
@@ -441,24 +479,43 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
         ),
     );
 
-    this.server.tool(
+    this.server.registerTool(
       "list_bank_transactions",
       {
-        page: pageParam,
-        perPage: perPageParam,
-        bankAccount: z.string().min(1),
-        view: z.string().optional(),
-        fromDate: z.string().optional(),
-        toDate: z.string().optional(),
-        updatedSince: z.string().optional(),
-        lastUploaded: z.boolean().optional(),
+        description:
+          "Lists transactions for one bank account. `bankAccount` accepts a resource URL, a bare numeric id, a nominal code, or an account name.",
+        inputSchema: {
+          page: pageParam,
+          perPage: perPageParam,
+          bankAccount: z.string().min(1).describe(
+            "Resource URL, bare numeric id, nominal code (e.g. 750-1), or account name. Resolved automatically.",
+          ),
+          view: z.string().optional().describe(
+            "all, unexplained, explained, manual, imported, marked_for_review.",
+          ),
+          fromDate: z.string().optional().describe("YYYY-MM-DD."),
+          toDate: z.string().optional().describe("YYYY-MM-DD."),
+          updatedSince: z.string().optional(),
+          lastUploaded: z.boolean().optional(),
+        },
       },
-      async ({ page, perPage, bankAccount, view, fromDate, toDate, updatedSince, lastUploaded }) =>
-        this.readOnlyListToolCall(
+      async ({ page, perPage, bankAccount, view, fromDate, toDate, updatedSince, lastUploaded }) => {
+        let resolvedBankAccount: string;
+
+        try {
+          const { accessToken } = await this.prepareAuthenticatedContext();
+          resolvedBankAccount = await this.resolveBankAccountRef(bankAccount, accessToken);
+        } catch (cause) {
+          return this.textResponse(
+            formatFreeAgentErrorMessage("Failed to list bank transactions", cause),
+          );
+        }
+
+        return this.readOnlyListToolCall(
           buildBankTransactionsPath({
             page,
             perPage,
-            bankAccount,
+            bankAccount: resolvedBankAccount,
             view,
             fromDate,
             toDate,
@@ -466,7 +523,8 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
             lastUploaded,
           }),
           "Failed to list bank transactions",
-        ),
+        );
+      },
     );
 
     this.server.tool(
@@ -711,12 +769,9 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
     name: string,
     shape: OptionalArgsShape,
     cb: (args: any) => Promise<TextToolResponse> | TextToolResponse,
+    description?: string,
   ): void {
-    const inputSchema = z.object(shape).optional();
-
-    this.server.registerTool(name, { inputSchema: inputSchema as z.ZodTypeAny }, async (args) =>
-      cb((args ?? {}) as any),
-    );
+    registerOptionalTool(this.server, name, shape, cb, description);
   }
 
   private buildAuthStatusMessage(): string {
@@ -810,16 +865,136 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
         buildRequestScope(this.state),
       );
 
-      if (pagination) {
-        return this.jsonResponse({
-          ...payload,
-          pagination,
-        });
+      if (!pagination) {
+        return this.jsonResponse(payload);
       }
 
-      return this.jsonResponse(payload);
+      const truncation = buildTruncationNotice(pagination, countCollectionItems(payload));
+
+      return this.jsonResponse({
+        ...(truncation ? { truncation } : {}),
+        ...payload,
+        pagination,
+      });
     } catch (cause) {
       return this.textResponse(formatFreeAgentErrorMessage(errorPrefix, cause));
+    }
+  }
+
+  /**
+   * Fetches every page before returning.
+   *
+   * Used for reports that read as a single document. FreeAgent paginates them
+   * at 25 rows like any other collection, and a trial balance missing its tail
+   * still looks like a complete trial balance.
+   */
+  private async readOnlyAggregatedToolCall(path: string, errorPrefix: string): Promise<TextToolResponse> {
+    try {
+      const { accessToken } = await this.prepareAuthenticatedContext();
+      const { payload, pagesFetched, complete, totalCount } = await freeAgentGetAllPages<
+        Record<string, unknown>
+      >(path, accessToken, this.getAppEnv(), buildRequestScope(this.state));
+
+      const returned = countCollectionItems(payload);
+
+      return this.jsonResponse({
+        ...(complete
+          ? {}
+          : {
+            truncation: {
+              truncated: true,
+              returned,
+              totalCount,
+              message:
+                `INCOMPLETE RESULT: stopped after ${pagesFetched} pages of auto-pagination. ` +
+                `This report is missing rows — narrow the date range and retry.`,
+            },
+          }),
+        ...payload,
+        pagination: {
+          autoPaginated: true,
+          pagesFetched,
+          complete,
+          ...(totalCount !== undefined ? { totalCount } : {}),
+        },
+      });
+    } catch (cause) {
+      return this.textResponse(formatFreeAgentErrorMessage(errorPrefix, cause));
+    }
+  }
+
+  /**
+   * Turns a user-supplied bank account reference into the resource URL that
+   * FreeAgent's `bank_account` filter requires. Anything that isn't already a
+   * URL or a bare id is matched against the account list by nominal code or name.
+   */
+  private async resolveBankAccountRef(ref: string, accessToken: string): Promise<string> {
+    const env = this.getAppEnv();
+    const direct = resolveDirectBankAccountRef(ref, getFreeAgentApiBaseUrl(env));
+
+    if (direct) {
+      return direct;
+    }
+
+    const payload = await freeAgentGet<{
+      bank_accounts?: Array<{ url?: string; name?: string; nominal_code?: string }>;
+    }>(buildBankAccountsPath({ perPage: 100 }), accessToken, env, buildRequestScope(this.state));
+
+    const accounts = payload.bank_accounts ?? [];
+    const needle = ref.trim().toLowerCase();
+    const match =
+      accounts.find((account) => account.nominal_code?.toLowerCase() === needle) ??
+      accounts.find((account) => account.name?.toLowerCase() === needle) ??
+      accounts.find((account) => account.name?.toLowerCase().includes(needle));
+
+    if (!match?.url) {
+      const available = accounts
+        .map((account) => `${account.name ?? "unnamed"} (${account.nominal_code ?? "no code"})`)
+        .join(", ");
+
+      throw new Error(
+        `Could not resolve bank account "${ref}". Available accounts: ${available || "none"}. ` +
+          "Pass a resource URL, numeric id, nominal code, or exact account name.",
+      );
+    }
+
+    return match.url;
+  }
+
+  /**
+   * The final accounts resource is filing metadata only — FreeAgent exposes no
+   * figures on it and has no companion endpoint that does. Rather than return a
+   * bare metadata blob that reads as a failed lookup, point at the report
+   * endpoints that do carry numbers, pre-filled with this period's dates.
+   */
+  private async getFinalAccountsReport(periodEndsOn: string): Promise<TextToolResponse> {
+    try {
+      const { accessToken } = await this.prepareAuthenticatedContext();
+      const payload = await freeAgentGet<{
+        final_accounts_report?: { period_starts_on?: string; period_ends_on?: string };
+      }>(
+        buildFinalAccountsReportPath(periodEndsOn),
+        accessToken,
+        this.getAppEnv(),
+        buildRequestScope(this.state),
+      );
+
+      const report = payload.final_accounts_report;
+      const fromDate = report?.period_starts_on;
+      const toDate = report?.period_ends_on ?? periodEndsOn;
+
+      return this.jsonResponse({
+        ...payload,
+        note:
+          "This resource contains filing metadata only; FreeAgent does not expose final accounts figures through it. " +
+          `For the numbers in this period call get_profit_and_loss({ fromDate: "${fromDate ?? "<period_starts_on>"}", toDate: "${toDate}" }), ` +
+          `get_trial_balance_summary({ fromDate: "${fromDate ?? "<period_starts_on>"}", toDate: "${toDate}" }), ` +
+          `or get_balance_sheet({ asAtDate: "${toDate}" }).`,
+      });
+    } catch (cause) {
+      return this.textResponse(
+        formatFreeAgentErrorMessage("Failed to get final accounts report", cause),
+      );
     }
   }
 
