@@ -5,7 +5,10 @@ export default defineConfig({
   plugins: [
     cloudflareTest({
       wrangler: {
-        configPath: "./wrangler.jsonc",
+        // A committed, account-neutral config rather than the gitignored real
+        // one: tests use simulated bindings and need no real values, so this
+        // keeps `npm test` working on a fresh clone with no setup.
+        configPath: "./wrangler.test.jsonc",
       },
     }),
   ],
