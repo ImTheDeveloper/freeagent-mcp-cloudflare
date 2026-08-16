@@ -210,11 +210,32 @@ async function run() {
   const tools = await client.listTools();
   console.log(`\nDiscovered ${tools.tools.length} tools.`);
 
+  // Any list_/report tool advertising no parameters is the pagination bug:
+  // callers cannot override the 25-row default they cannot see.
+  const missingParams = tools.tools.filter(
+    (tool) =>
+      (tool.name.startsWith("list_") || tool.name.startsWith("get_")) &&
+      Object.keys(tool.inputSchema?.properties ?? {}).length === 0 &&
+      !["get_me", "get_company", "get_practice", "get_invoice_timeline", "get_company_tax_timeline"].includes(
+        tool.name,
+      ),
+  );
+
+  console.log("\nTools advertising no parameters:");
+  console.log(missingParams.length ? missingParams.map((tool) => `  - ${tool.name}`).join("\n") : "  (none)");
+
+  const invoiceSchema = tools.tools.find((tool) => tool.name === "list_invoices");
+  console.log(
+    `\nlist_invoices parameters: ${Object.keys(invoiceSchema?.inputSchema?.properties ?? {}).join(", ") || "NONE"}`,
+  );
+
   await callToolAndPrint(client, "auth_status");
   await callToolAndPrint(client, "get_me");
   await callToolAndPrint(client, "get_company");
   await callToolAndPrint(client, "get_balance_sheet");
   await callToolAndPrint(client, "get_profit_and_loss");
+  // Must return every nominal code, not just the first 25.
+  await callToolAndPrint(client, "get_trial_balance_summary");
   await callToolAndPrint(client, "list_invoices", { page: 1, perPage: 10 });
   await callToolAndPrint(client, "list_bank_accounts", { page: 1, perPage: 20 });
   await callToolAndPrint(client, "list_transactions", { page: 1, perPage: 10 });

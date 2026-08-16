@@ -93,17 +93,19 @@ When helping users set up this repo, follow this exact order:
 
 1. Install dependencies with `npm install`.
 2. Copy `.dev.vars.example` to `.dev.vars`.
-3. Ask the user to provide values for `FREEAGENT_CLIENT_ID`, `FREEAGENT_CLIENT_SECRET`, and `TOKEN_ENCRYPTION_KEY`.
-4. Run `npm run type-check` and `npm run test` before starting dev or deploy steps.
-5. Start local dev with `npm run dev`.
-6. For deployment, ensure Wrangler auth works, then run `npx wrangler deploy`.
+3. Copy `wrangler.jsonc.example` to `wrangler.jsonc`, then fill in your own KV namespace id
+   (`npx wrangler kv namespace create OAUTH_KV`) and `WORKER_BASE_URL`.
+4. Ask the user to provide values for `FREEAGENT_CLIENT_ID`, `FREEAGENT_CLIENT_SECRET`, and `TOKEN_ENCRYPTION_KEY`.
+5. Run `npm run type-check` and `npm run test` before starting dev or deploy steps.
+6. Start local dev with `npm run dev`.
+7. For deployment, ensure Wrangler auth works, then run `npx wrangler deploy`.
 
 Rules for LLM agents:
 
 - Never invent or hardcode credentials.
 - Never commit `.dev.vars`, real secrets, or account-specific deployment values.
-- Keep `wrangler.jsonc` placeholders intact in public branches.
-- If account-specific config is temporarily needed for testing, keep it out of the public branch or restore placeholders before publishing.
+- `wrangler.jsonc` is gitignored and holds real values; `wrangler.jsonc.example` is committed and must
+  keep its placeholders. Never move real ids or URLs into the example file.
 
 ## Connect From Claude Or ChatGPT
 

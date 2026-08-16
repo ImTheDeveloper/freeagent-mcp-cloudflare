@@ -19,12 +19,20 @@ function buildResourceIdPath(basePath: string, id: string): string {
   return `${basePath}/${encodeURIComponent(id)}`;
 }
 
+/**
+ * FreeAgent does not support from_date/to_date on /v2/invoices — only
+ * `updated_since` and the status `view`. Sending them anyway risks either a 400
+ * or, worse, a silently unfiltered result, so date filtering is applied to the
+ * fetched rows instead. See filterRowsByDateRange.
+ */
 export function buildInvoicesPath(
   options?: PaginatedQueryOptions &
-    DateQueryOptions &
     SortQueryOptions & {
       view?: string;
+      updatedSince?: string;
       includeItems?: boolean;
+      contact?: string;
+      project?: string;
     },
 ): string {
   return buildPathWithQuery("/v2/invoices", {
@@ -33,7 +41,35 @@ export function buildInvoicesPath(
     view: options?.view,
     sort: options?.sort,
     updated_since: options?.updatedSince,
+    contact: options?.contact,
+    project: options?.project,
     nested_invoice_items: options?.includeItems ? true : undefined,
+  });
+}
+
+/**
+ * Filters rows by `dated_on` for endpoints with no server-side date filter.
+ *
+ * ISO dates compare correctly as strings, so no parsing is needed. Rows with no
+ * `dated_on` are dropped: keeping them would pad a date-bounded answer with
+ * records that cannot be shown to belong in the window.
+ */
+export function filterRowsByDateRange<T extends { dated_on?: string }>(
+  rows: T[],
+  fromDate?: string,
+  toDate?: string,
+): T[] {
+  if (!fromDate && !toDate) {
+    return rows;
+  }
+
+  return rows.filter((row) => {
+    if (!row.dated_on) {
+      return false;
+    }
+
+    return (fromDate === undefined || row.dated_on >= fromDate) &&
+      (toDate === undefined || row.dated_on <= toDate);
   });
 }
 
@@ -183,6 +219,43 @@ export function buildBankTransactionsPath(
     updated_since: options.updatedSince,
     last_uploaded: options.lastUploaded ? true : undefined,
   });
+}
+
+/**
+ * Resolves a bank account reference that needs no API lookup.
+ *
+ * FreeAgent's `bank_account` filter only accepts a full resource URL, so a bare
+ * id is expanded here. Returns null when the reference is a nominal code or
+ * name and has to be matched against the account list instead.
+ */
+export function resolveDirectBankAccountRef(ref: string, apiBaseUrl: string): string | null {
+  const trimmed = ref.trim();
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  if (/^\d+$/.test(trimmed)) {
+    return `${apiBaseUrl.replace(/\/+$/, "")}/v2/bank_accounts/${trimmed}`;
+  }
+
+  return null;
+}
+
+/**
+ * Extracts the bank account id from a bank nominal code.
+ *
+ * FreeAgent reports bank accounts in the trial balance as `750-<account id>`,
+ * e.g. `750-123456`. The bank_accounts resource carries no nominal_code field,
+ * so this suffix is the only link between the two representations.
+ */
+export function extractBankAccountIdFromNominalCode(ref: string): string | null {
+  return ref.trim().match(/^\d{3,4}-(\d+)$/)?.[1] ?? null;
+}
+
+/** Pulls the numeric id out of a bank account resource URL. */
+export function bankAccountIdFromUrl(url: string): string | null {
+  return url.match(/\/bank_accounts\/(\d+)(?:[/?#]|$)/)?.[1] ?? null;
 }
 
 export function buildBankTransactionPath(id: string): string {
