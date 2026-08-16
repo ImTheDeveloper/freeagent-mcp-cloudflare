@@ -13,6 +13,8 @@ import {
   buildRecurringInvoicesPath,
   buildTransactionPath,
   buildTransactionsPath,
+  bankAccountIdFromUrl,
+  extractBankAccountIdFromNominalCode,
   resolveDirectBankAccountRef,
 } from "../src/freeagent/resources";
 
@@ -75,6 +77,27 @@ describe("freeagent operational resource helpers", () => {
     // Nominal codes and names need the account list, so they defer to a lookup.
     expect(resolveDirectBankAccountRef("750-1", base)).toBeNull();
     expect(resolveDirectBankAccountRef("Business Current", base)).toBeNull();
+  });
+
+  it("maps a bank nominal code onto the account id the API uses", () => {
+    // The trial balance reports a bank account as 750-<id>, while the
+    // bank_accounts resource exposes no nominal_code field at all.
+    expect(extractBankAccountIdFromNominalCode("750-123456")).toBe("123456");
+    expect(extractBankAccountIdFromNominalCode(" 750-123456 ")).toBe("123456");
+    // A display code such as 750-1 parses, but no account will carry id 1,
+    // so the caller gets the account list back instead of a bare 404.
+    expect(extractBankAccountIdFromNominalCode("750-1")).toBe("1");
+    expect(extractBankAccountIdFromNominalCode("123456")).toBeNull();
+    expect(extractBankAccountIdFromNominalCode("Current Account")).toBeNull();
+    expect(extractBankAccountIdFromNominalCode("750-abc")).toBeNull();
+  });
+
+  it("extracts the account id from a bank account resource URL", () => {
+    expect(bankAccountIdFromUrl("https://api.freeagent.com/v2/bank_accounts/123456")).toBe("123456");
+    expect(bankAccountIdFromUrl("https://api.freeagent.com/v2/bank_accounts/123456?x=1")).toBe(
+      "123456",
+    );
+    expect(bankAccountIdFromUrl("https://api.freeagent.com/v2/invoices/1")).toBeNull();
   });
 
   it("builds estimates, bills, expenses, recurring invoices, and transactions paths", () => {

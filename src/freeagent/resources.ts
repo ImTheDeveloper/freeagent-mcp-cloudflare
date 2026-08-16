@@ -212,6 +212,22 @@ export function resolveDirectBankAccountRef(ref: string, apiBaseUrl: string): st
   return null;
 }
 
+/**
+ * Extracts the bank account id from a bank nominal code.
+ *
+ * FreeAgent reports bank accounts in the trial balance as `750-<account id>`,
+ * e.g. `750-123456`. The bank_accounts resource carries no nominal_code field,
+ * so this suffix is the only link between the two representations.
+ */
+export function extractBankAccountIdFromNominalCode(ref: string): string | null {
+  return ref.trim().match(/^\d{3,4}-(\d+)$/)?.[1] ?? null;
+}
+
+/** Pulls the numeric id out of a bank account resource URL. */
+export function bankAccountIdFromUrl(url: string): string | null {
+  return url.match(/\/bank_accounts\/(\d+)(?:[/?#]|$)/)?.[1] ?? null;
+}
+
 export function buildBankTransactionPath(id: string): string {
   return buildResourceIdPath("/v2/bank_transactions", id);
 }

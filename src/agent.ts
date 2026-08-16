@@ -49,6 +49,8 @@ import {
   buildProjectsPath,
   buildRecurringInvoicePath,
   buildRecurringInvoicesPath,
+  bankAccountIdFromUrl,
+  extractBankAccountIdFromNominalCode,
   resolveDirectBankAccountRef,
   buildTaskPath,
   buildTasksPath,
@@ -937,24 +939,38 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
     }
 
     const payload = await freeAgentGet<{
-      bank_accounts?: Array<{ url?: string; name?: string; nominal_code?: string }>;
+      bank_accounts?: Array<{ url?: string; name?: string; bank_name?: string }>;
     }>(buildBankAccountsPath({ perPage: 100 }), accessToken, env, buildRequestScope(this.state));
 
-    const accounts = payload.bank_accounts ?? [];
+    const accounts = (payload.bank_accounts ?? []).filter((account) => Boolean(account.url));
     const needle = ref.trim().toLowerCase();
+    const nominalCodeId = extractBankAccountIdFromNominalCode(ref);
+
     const match =
-      accounts.find((account) => account.nominal_code?.toLowerCase() === needle) ??
+      // `750-<id>` from the trial balance: the suffix is the account id.
+      (nominalCodeId
+        ? accounts.find((account) => bankAccountIdFromUrl(account.url as string) === nominalCodeId)
+        : undefined) ??
       accounts.find((account) => account.name?.toLowerCase() === needle) ??
+      accounts.find((account) => account.bank_name?.toLowerCase() === needle) ??
       accounts.find((account) => account.name?.toLowerCase().includes(needle));
 
     if (!match?.url) {
       const available = accounts
-        .map((account) => `${account.name ?? "unnamed"} (${account.nominal_code ?? "no code"})`)
-        .join(", ");
+        .map((account) => {
+          const id = bankAccountIdFromUrl(account.url as string);
+          return `${account.name ?? "unnamed"} [nominal 750-${id ?? "?"}, id ${id ?? "?"}]`;
+        })
+        .join("; ");
 
       throw new Error(
-        `Could not resolve bank account "${ref}". Available accounts: ${available || "none"}. ` +
-          "Pass a resource URL, numeric id, nominal code, or exact account name.",
+        `Could not resolve bank account "${ref}". ` +
+          (nominalCodeId
+            ? `No account has id ${nominalCodeId}. Note that a code such as 750-1 is a display code, ` +
+              "not the API identifier; the trial balance shows the real one. "
+            : "") +
+          `Available accounts: ${available || "none"}. ` +
+          "Pass a resource URL, numeric id, a 750-<id> nominal code, or an account name.",
       );
     }
 
