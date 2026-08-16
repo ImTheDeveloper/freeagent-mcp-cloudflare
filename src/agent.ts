@@ -218,7 +218,7 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
           buildProfitAndLossSummaryPath({ fromDate, toDate, accountingPeriod }),
           "Failed to get profit and loss summary",
         ),
-      "Profit and loss summary. Date ranges must be 12 months or less and within one accounting year. All rows are fetched and concatenated.",
+      "Profit and loss summary. WITH NO DATES IT RETURNS THE CURRENT ACCOUNTING YEAR TO DATE, not a full year — pass fromDate/toDate for a complete period. Ranges must be 12 months or less, or contained within one accounting year. Note the response carries several profit figures: use operating_profit or retained_profit for this period; retained_profit_carried_forward is a cumulative balance, not the period result.",
     );
 
     this.registerOptionalTool(
@@ -232,7 +232,7 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
           buildTrialBalanceSummaryPath({ fromDate, toDate }),
           "Failed to get trial balance summary",
         ),
-      "Full trial balance for the period. Every nominal code is fetched and concatenated, so the result is complete rather than a first page.",
+      "Full trial balance for the period. Every nominal code is fetched and concatenated, so the result is complete rather than a first page. With no dates it reports as at today. Each row carries both `display_nominal_code` (e.g. 750-1, what the FreeAgent UI shows) and `nominal_code` (e.g. 750-123456, whose suffix is the underlying resource id) — quote display_nominal_code to a human, and use nominal_code when cross-referencing another endpoint.",
     );
 
     this.server.tool("get_trial_balance_opening_balances", async () =>
@@ -242,11 +242,15 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
       ),
     );
 
-    this.server.tool(
+    this.server.registerTool(
       "get_cashflow",
       {
-        fromDate: z.string(),
-        toDate: z.string(),
+        description:
+          "Historic cash movement between two dates. It does NOT project: a range in the future returns a total of 0, which means 'not supported', not 'no cash expected'. Incoming and outgoing totals are both positive; balance is incoming minus outgoing.",
+        inputSchema: {
+          fromDate: z.string().describe("YYYY-MM-DD. Past dates only; future ranges return zero."),
+          toDate: z.string().describe("YYYY-MM-DD."),
+        },
       },
       async ({ fromDate, toDate }) =>
         this.readOnlyToolCall(
@@ -283,8 +287,15 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
       async ({ periodEndsOn }) => this.getFinalAccountsReport(periodEndsOn),
     );
 
-    this.server.tool("get_company_tax_timeline", async () =>
-      this.readOnlyToolCall("/v2/company/tax_timeline", "Failed to get company tax timeline"),
+    this.server.registerTool(
+      "get_company_tax_timeline",
+      {
+        description:
+          "Upcoming tax dates and amounts. The array mixes company and personal liabilities: filter on `is_personal` before totalling, or a director's self-assessment will be added to the company's bill. `amount_due` is omitted entirely, not zero, when it does not apply.",
+        inputSchema: {},
+      },
+      async () =>
+        this.readOnlyToolCall("/v2/company/tax_timeline", "Failed to get company tax timeline"),
     );
 
     this.registerOptionalTool(
@@ -565,15 +576,18 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
       {
         page: pageParam,
         perPage: perPageParam,
-        fromDate: z.string().optional(),
-        toDate: z.string().optional(),
-        nominalCode: z.string().optional(),
+        fromDate: z.string().optional().describe("YYYY-MM-DD. Omitting this does NOT return all history."),
+        toDate: z.string().optional().describe("YYYY-MM-DD."),
+        nominalCode: z.string().optional().describe(
+          "Full nominal code, e.g. 285 or 750-123456. Use the trial balance's `nominal_code`, not `display_nominal_code`.",
+        ),
       },
       async ({ page, perPage, fromDate, toDate, nominalCode }) =>
         this.readOnlyListToolCall(
           buildTransactionsPath({ page, perPage, fromDate, toDate, nominalCode }),
           "Failed to list transactions",
         ),
+      "Accounting ledger entries. WITH NO DATES IT RETURNS ONLY THE CURRENT ACCOUNTING PERIOD TO DATE, not all history — always pass fromDate/toDate when asking about earlier years. Ranges must be 12 months or less, or within one accounting year. `debit_value` encodes direction: credits are negative and there is no separate credit field, so sum it signed rather than by absolute value.",
     );
 
     this.server.tool(
@@ -744,12 +758,17 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
 
     this.registerOptionalTool(
       "list_categories",
-      { subAccounts: z.boolean().optional() },
+      {
+        subAccounts: z.boolean().optional().describe(
+          "Pass true to see individual bank accounts, users, and assets. Without it they are collapsed into their parent category.",
+        ),
+      },
       async ({ subAccounts }) =>
         this.readOnlyToolCall(
           buildCategoriesPath({ subAccounts }),
           "Failed to list categories",
         ),
+      "Chart of accounts. WITHOUT subAccounts=true, individual bank accounts, users, and assets are replaced by a single parent category, so counting rows will undercount them. Results come back split across several arrays by type (income_categories, admin_expenses_categories, ...), not one flat list.",
     );
 
     this.server.tool(
@@ -983,6 +1002,17 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
       accounts.find((account) => account.bank_name?.toLowerCase() === needle) ??
       accounts.find((account) => account.name?.toLowerCase().includes(needle));
 
+    if (!match?.url && nominalCodeId) {
+      // `750-1` is a display code, not the API identifier. The trial balance is
+      // the only place that maps display_nominal_code onto a bank account, so
+      // fall back to it rather than rejecting what a user would naturally type.
+      const resolved = await this.resolveBankAccountFromDisplayCode(ref, accessToken);
+
+      if (resolved) {
+        return resolved;
+      }
+    }
+
     if (!match?.url) {
       const available = accounts
         .map((account) => {
@@ -1039,6 +1069,45 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
       return this.textResponse(
         formatFreeAgentErrorMessage("Failed to get final accounts report", cause),
       );
+    }
+  }
+
+  /**
+   * Looks a bank account up by the nominal code FreeAgent shows in its UI.
+   *
+   * The trial balance is the only endpoint that exposes both forms on one row:
+   * `display_nominal_code` (750-1) alongside the bank account URL. It must be
+   * fully paginated, since bank accounts sort well past the first 25 rows.
+   */
+  private async resolveBankAccountFromDisplayCode(
+    ref: string,
+    accessToken: string,
+  ): Promise<string | null> {
+    try {
+      const { payload } = await freeAgentGetAllPages<{
+        trial_balance_summary?: Array<{
+          display_nominal_code?: string;
+          nominal_code?: string;
+          bank_account?: string;
+        }>;
+      }>(
+        buildTrialBalanceSummaryPath(),
+        accessToken,
+        this.getAppEnv(),
+        buildRequestScope(this.state),
+      );
+
+      const needle = ref.trim();
+      const row = (payload.trial_balance_summary ?? []).find(
+        (candidate) =>
+          Boolean(candidate.bank_account) &&
+          (candidate.display_nominal_code === needle || candidate.nominal_code === needle),
+      );
+
+      return row?.bank_account ?? null;
+    } catch {
+      // The caller still has a useful error to report; don't mask it with this one.
+      return null;
     }
   }
 
