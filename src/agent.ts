@@ -51,7 +51,7 @@ import {
   buildRecurringInvoicesPath,
   bankAccountIdFromUrl,
   extractBankAccountIdFromNominalCode,
-  findRowsOutsideDateRange,
+  filterRowsByDateRange,
   resolveDirectBankAccountRef,
   buildTaskPath,
   buildTasksPath,
@@ -310,49 +310,35 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
           "Defaults to -created_at (newest first). Prefix with '-' to reverse. Documented values: created_at, updated_at.",
         ),
         fromDate: z.string().optional().describe(
-          "YYYY-MM-DD. Undocumented by FreeAgent; the response reports whether it was actually applied.",
+          "YYYY-MM-DD, filters on dated_on. Applied by this server, not FreeAgent, so it exhausts all pages first.",
         ),
         toDate: z.string().optional().describe(
-          "YYYY-MM-DD. Undocumented by FreeAgent; the response reports whether it was actually applied.",
+          "YYYY-MM-DD, filters on dated_on. Applied by this server, not FreeAgent, so it exhausts all pages first.",
         ),
         updatedSince: z.string().optional(),
         contact: z.string().optional().describe("Contact resource URL."),
         project: z.string().optional().describe("Project resource URL."),
         includeItems: z.boolean().optional(),
       },
-      async ({ page, perPage, view, sort, fromDate, toDate, updatedSince, contact, project, includeItems }) =>
-        this.readOnlyListToolCall(
-          buildInvoicesPath({
-            page,
-            perPage,
-            view,
-            sort: sort ?? "-created_at",
-            fromDate,
-            toDate,
-            updatedSince,
-            contact,
-            project,
-            includeItems,
-          }),
-          "Failed to list invoices",
-          (payload) => {
-            const rows = (payload.invoices ?? []) as Array<{ dated_on?: string }>;
-            const outside = findRowsOutsideDateRange(rows, fromDate, toDate);
+      async ({ page, perPage, view, sort, fromDate, toDate, updatedSince, contact, project, includeItems }) => {
+        const basePath = buildInvoicesPath({
+          page,
+          perPage,
+          view,
+          sort: sort ?? "-created_at",
+          updatedSince,
+          contact,
+          project,
+          includeItems,
+        });
 
-            if (outside === 0) {
-              return {};
-            }
+        if (!fromDate && !toDate) {
+          return this.readOnlyListToolCall(basePath, "Failed to list invoices");
+        }
 
-            return {
-              dateFilterWarning:
-                `UNFILTERED RESULT: ${outside} of ${rows.length} invoices fall outside ` +
-                `${fromDate ?? "any start"}..${toDate ?? "any end"}. FreeAgent ignored the date filter ` +
-                "on this endpoint, so these results are NOT date-filtered. Filter by `dated_on` yourself, " +
-                "and page through every result first — the unfiltered set is larger than one page.",
-            };
-          },
-        ),
-      "Lists invoices, newest first by default. Paginated: check the `truncation` field in the response and page through it before drawing conclusions.",
+        return this.dateFilteredInvoices(basePath, fromDate, toDate);
+      },
+      "Lists invoices, newest first by default. FreeAgent has no server-side date filter on invoices, so fromDate/toDate are applied here across every page — use them rather than paging manually. Without them, check the `truncation` field before drawing conclusions.",
     );
 
     this.server.tool(
@@ -630,7 +616,9 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
       {
         page: pageParam,
         perPage: perPageParam,
-        view: z.string().optional(),
+        view: z.string().optional().describe(
+          "active (DEFAULT — excludes hidden contacts), all, hidden, clients, suppliers, active_projects, completed_projects, open_clients, open_suppliers.",
+        ),
         sort: z.string().optional(),
         updatedSince: z.string().optional(),
       },
@@ -639,6 +627,7 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
           buildContactsPath({ page, perPage, view, sort, updatedSince }),
           "Failed to list contacts",
         ),
+      "Lists contacts. WITHOUT a view this returns ACTIVE CONTACTS ONLY — hidden contacts are excluded, so pass view='all' before saying a contact does not exist or counting how many there are.",
     );
 
     this.server.tool(
@@ -740,13 +729,16 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
       {
         page: pageParam,
         perPage: perPageParam,
-        view: z.string().optional(),
+        view: z.string().optional().describe(
+          "all (default), staff, active_staff, advisors, active_advisors.",
+        ),
       },
       async ({ page, perPage, view }) =>
         this.readOnlyListToolCall(
           buildUsersPath({ page, perPage, view }),
           "Failed to list users",
         ),
+      "Lists users. The default view includes FORMER and inactive staff — the opposite of list_contacts, which hides inactive records by default. Use view='active_staff' for current staff only.",
     );
 
     this.server.tool(
@@ -1108,6 +1100,60 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
     } catch {
       // The caller still has a useful error to report; don't mask it with this one.
       return null;
+    }
+  }
+
+  /**
+   * Lists invoices within a date range.
+   *
+   * /v2/invoices has no from_date/to_date filter, so every page is fetched and
+   * `dated_on` is filtered here. Returning a first page filtered locally would
+   * silently omit older invoices that had not been fetched yet, which is the
+   * failure this server exists to avoid.
+   */
+  private async dateFilteredInvoices(
+    basePath: string,
+    fromDate?: string,
+    toDate?: string,
+  ): Promise<TextToolResponse> {
+    try {
+      const { accessToken } = await this.prepareAuthenticatedContext();
+      const { payload, pagesFetched, complete, totalCount } = await freeAgentGetAllPages<{
+        invoices?: Array<{ dated_on?: string }>;
+      }>(basePath, accessToken, this.getAppEnv(), buildRequestScope(this.state));
+
+      const scanned = payload.invoices ?? [];
+      const invoices = filterRowsByDateRange(scanned, fromDate, toDate);
+
+      return this.jsonResponse({
+        ...(complete
+          ? {}
+          : {
+            truncation: {
+              truncated: true,
+              message:
+                `INCOMPLETE RESULT: stopped after ${pagesFetched} pages before reaching the end of the ` +
+                "invoice list, so older invoices in this range may be missing. Narrow the range or add a view filter.",
+            },
+          }),
+        invoices,
+        dateFilter: {
+          fromDate: fromDate ?? null,
+          toDate: toDate ?? null,
+          appliedBy: "mcp-server",
+          reason: "FreeAgent does not support from_date/to_date on /v2/invoices.",
+          matched: invoices.length,
+          scanned: scanned.length,
+        },
+        pagination: {
+          autoPaginated: true,
+          pagesFetched,
+          complete,
+          ...(totalCount !== undefined ? { totalCount } : {}),
+        },
+      });
+    } catch (cause) {
+      return this.textResponse(formatFreeAgentErrorMessage("Failed to list invoices", cause));
     }
   }
 

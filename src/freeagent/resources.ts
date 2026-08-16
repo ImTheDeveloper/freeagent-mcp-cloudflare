@@ -19,11 +19,17 @@ function buildResourceIdPath(basePath: string, id: string): string {
   return `${basePath}/${encodeURIComponent(id)}`;
 }
 
+/**
+ * FreeAgent does not support from_date/to_date on /v2/invoices — only
+ * `updated_since` and the status `view`. Sending them anyway risks either a 400
+ * or, worse, a silently unfiltered result, so date filtering is applied to the
+ * fetched rows instead. See filterRowsByDateRange.
+ */
 export function buildInvoicesPath(
   options?: PaginatedQueryOptions &
-    DateQueryOptions &
     SortQueryOptions & {
       view?: string;
+      updatedSince?: string;
       includeItems?: boolean;
       contact?: string;
       project?: string;
@@ -34,8 +40,6 @@ export function buildInvoicesPath(
     per_page: options?.perPage,
     view: options?.view,
     sort: options?.sort,
-    from_date: options?.fromDate,
-    to_date: options?.toDate,
     updated_since: options?.updatedSince,
     contact: options?.contact,
     project: options?.project,
@@ -44,20 +48,19 @@ export function buildInvoicesPath(
 }
 
 /**
- * Detects a date filter that the API accepted but did not apply.
+ * Filters rows by `dated_on` for endpoints with no server-side date filter.
  *
- * FreeAgent does not document `from_date`/`to_date` on /v2/invoices, and an
- * unsupported query param is ignored rather than rejected. That would return
- * every invoice while looking filtered, so the returned rows are checked
- * against the requested window and any mismatch is reported to the caller.
+ * ISO dates compare correctly as strings, so no parsing is needed. Rows with no
+ * `dated_on` are dropped: keeping them would pad a date-bounded answer with
+ * records that cannot be shown to belong in the window.
  */
-export function findRowsOutsideDateRange(
-  rows: Array<{ dated_on?: string }>,
+export function filterRowsByDateRange<T extends { dated_on?: string }>(
+  rows: T[],
   fromDate?: string,
   toDate?: string,
-): number {
+): T[] {
   if (!fromDate && !toDate) {
-    return 0;
+    return rows;
   }
 
   return rows.filter((row) => {
@@ -65,9 +68,9 @@ export function findRowsOutsideDateRange(
       return false;
     }
 
-    return (fromDate !== undefined && row.dated_on < fromDate) ||
-      (toDate !== undefined && row.dated_on > toDate);
-  }).length;
+    return (fromDate === undefined || row.dated_on >= fromDate) &&
+      (toDate === undefined || row.dated_on <= toDate);
+  });
 }
 
 export function buildInvoicePath(id: string): string {
