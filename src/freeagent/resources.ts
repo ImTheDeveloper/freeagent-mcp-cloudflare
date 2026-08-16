@@ -43,6 +43,33 @@ export function buildInvoicesPath(
   });
 }
 
+/**
+ * Detects a date filter that the API accepted but did not apply.
+ *
+ * FreeAgent does not document `from_date`/`to_date` on /v2/invoices, and an
+ * unsupported query param is ignored rather than rejected. That would return
+ * every invoice while looking filtered, so the returned rows are checked
+ * against the requested window and any mismatch is reported to the caller.
+ */
+export function findRowsOutsideDateRange(
+  rows: Array<{ dated_on?: string }>,
+  fromDate?: string,
+  toDate?: string,
+): number {
+  if (!fromDate && !toDate) {
+    return 0;
+  }
+
+  return rows.filter((row) => {
+    if (!row.dated_on) {
+      return false;
+    }
+
+    return (fromDate !== undefined && row.dated_on < fromDate) ||
+      (toDate !== undefined && row.dated_on > toDate);
+  }).length;
+}
+
 export function buildInvoicePath(id: string): string {
   return buildResourceIdPath("/v2/invoices", id);
 }

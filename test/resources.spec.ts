@@ -15,6 +15,7 @@ import {
   buildTransactionsPath,
   bankAccountIdFromUrl,
   extractBankAccountIdFromNominalCode,
+  findRowsOutsideDateRange,
   resolveDirectBankAccountRef,
 } from "../src/freeagent/resources";
 
@@ -90,6 +91,27 @@ describe("freeagent operational resource helpers", () => {
     expect(extractBankAccountIdFromNominalCode("123456")).toBeNull();
     expect(extractBankAccountIdFromNominalCode("Current Account")).toBeNull();
     expect(extractBankAccountIdFromNominalCode("750-abc")).toBeNull();
+  });
+
+  it("detects a date filter the API accepted but ignored", () => {
+    const rows = [
+      { dated_on: "2021-06-01" },
+      { dated_on: "2025-07-01" },
+      { dated_on: "2026-01-15" },
+      { dated_on: "2026-12-31" },
+    ];
+
+    // FreeAgent honoured the filter: nothing falls outside the window.
+    expect(findRowsOutsideDateRange(rows.slice(1, 3), "2025-04-01", "2026-03-31")).toBe(0);
+    // FreeAgent ignored it: 2021 and 2026-12-31 leak through.
+    expect(findRowsOutsideDateRange(rows, "2025-04-01", "2026-03-31")).toBe(2);
+    // Open-ended ranges only police the bound that was given.
+    expect(findRowsOutsideDateRange(rows, "2025-04-01", undefined)).toBe(1);
+    expect(findRowsOutsideDateRange(rows, undefined, "2026-03-31")).toBe(1);
+    // No range requested means nothing to verify.
+    expect(findRowsOutsideDateRange(rows)).toBe(0);
+    // Rows without a date cannot contradict the filter.
+    expect(findRowsOutsideDateRange([{}], "2025-04-01", "2026-03-31")).toBe(0);
   });
 
   it("extracts the account id from a bank account resource URL", () => {

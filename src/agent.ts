@@ -51,6 +51,7 @@ import {
   buildRecurringInvoicesPath,
   bankAccountIdFromUrl,
   extractBankAccountIdFromNominalCode,
+  findRowsOutsideDateRange,
   resolveDirectBankAccountRef,
   buildTaskPath,
   buildTasksPath,
@@ -297,8 +298,12 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
         sort: z.string().optional().describe(
           "Defaults to -created_at (newest first). Prefix with '-' to reverse. Documented values: created_at, updated_at.",
         ),
-        fromDate: z.string().optional().describe("YYYY-MM-DD."),
-        toDate: z.string().optional().describe("YYYY-MM-DD."),
+        fromDate: z.string().optional().describe(
+          "YYYY-MM-DD. Undocumented by FreeAgent; the response reports whether it was actually applied.",
+        ),
+        toDate: z.string().optional().describe(
+          "YYYY-MM-DD. Undocumented by FreeAgent; the response reports whether it was actually applied.",
+        ),
         updatedSince: z.string().optional(),
         contact: z.string().optional().describe("Contact resource URL."),
         project: z.string().optional().describe("Project resource URL."),
@@ -319,6 +324,22 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
             includeItems,
           }),
           "Failed to list invoices",
+          (payload) => {
+            const rows = (payload.invoices ?? []) as Array<{ dated_on?: string }>;
+            const outside = findRowsOutsideDateRange(rows, fromDate, toDate);
+
+            if (outside === 0) {
+              return {};
+            }
+
+            return {
+              dateFilterWarning:
+                `UNFILTERED RESULT: ${outside} of ${rows.length} invoices fall outside ` +
+                `${fromDate ?? "any start"}..${toDate ?? "any end"}. FreeAgent ignored the date filter ` +
+                "on this endpoint, so these results are NOT date-filtered. Filter by `dated_on` yourself, " +
+                "and page through every result first — the unfiltered set is larger than one page.",
+            };
+          },
         ),
       "Lists invoices, newest first by default. Paginated: check the `truncation` field in the response and page through it before drawing conclusions.",
     );
@@ -857,7 +878,11 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
     }
   }
 
-  private async readOnlyListToolCall(path: string, errorPrefix: string): Promise<TextToolResponse> {
+  private async readOnlyListToolCall(
+    path: string,
+    errorPrefix: string,
+    augment?: (payload: Record<string, unknown>) => Record<string, unknown>,
+  ): Promise<TextToolResponse> {
     try {
       const { accessToken } = await this.prepareAuthenticatedContext();
       const { payload, pagination } = await freeAgentGetDetailed<Record<string, unknown>>(
@@ -867,14 +892,17 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
         buildRequestScope(this.state),
       );
 
+      const extra = augment?.(payload) ?? {};
+
       if (!pagination) {
-        return this.jsonResponse(payload);
+        return this.jsonResponse({ ...extra, ...payload });
       }
 
       const truncation = buildTruncationNotice(pagination, countCollectionItems(payload));
 
       return this.jsonResponse({
         ...(truncation ? { truncation } : {}),
+        ...extra,
         ...payload,
         pagination,
       });
