@@ -140,7 +140,7 @@ Both flags default to off. Only the exact string `"true"` enables them. Set them
 
 | Variable | Enables |
 | --- | --- |
-| `FREEAGENT_ENABLE_WRITES` | `create_contact`, `create_invoice` (always a draft), `transition_invoice` (send / draft / cancel, never emails), `reconcile_bank_transaction`, `update_bank_transaction_explanation` |
+| `FREEAGENT_ENABLE_WRITES` | `create_contact`, `create_invoice` (always a draft), `transition_invoice` (send / draft / cancel; does not call FreeAgent's send-email endpoint), `reconcile_bank_transaction`, `update_bank_transaction_explanation` |
 | `FREEAGENT_ENABLE_DELETES` | `delete_bank_transaction_explanation`, `delete_invoice`. Needs `FREEAGENT_ENABLE_WRITES` as well |
 
 `reconcile_bank_transaction` explains a transaction by category, invoice (`paidInvoice`) or bill (`paidBill`). It checks direction, amount and currency first and refuses rather than guess. `delete_bank_transaction_explanation` is the undo.

@@ -21,15 +21,18 @@ export type WriteResource =
 export function resolveResourceUrl(resource: WriteResource, ref: string, baseUrl: string): string {
   const trimmed = ref.trim();
   const prefix = `${baseUrl.replace(/\/+$/, "")}/v2/${resource}/`;
+  const ID = /^[A-Za-z0-9_-]+$/;
 
   if (/^https?:\/\//i.test(trimmed)) {
-    if (!trimmed.startsWith(prefix) || trimmed.length === prefix.length) {
+    // The remainder must be a plain id. Anything else (dot segments, encoded
+    // dots, extra path, query) could be normalised onto a different endpoint.
+    if (!trimmed.startsWith(prefix) || !ID.test(trimmed.slice(prefix.length))) {
       throw new Error(`Expected a ${resource} reference on ${baseUrl}, got "${trimmed}".`);
     }
     return trimmed;
   }
 
-  if (!/^[A-Za-z0-9_-]+$/.test(trimmed)) {
+  if (!ID.test(trimmed)) {
     throw new Error(`"${trimmed}" is not a valid ${resource} id or URL.`);
   }
 
@@ -137,7 +140,7 @@ export interface TransactionForReconcile {
 
 export interface TargetForReconcile {
   url: string;
-  due_value?: string;
+  due_value?: string | null;
   currency?: string;
   status?: string;
 }
@@ -207,15 +210,31 @@ export function planReconcile(input: ReconcileInput): ReconcilePlan {
     };
   }
 
+  let due: number | undefined;
+
+  if (target) {
+    if (target.due_value === undefined || target.due_value === null) {
+      return { ok: false, error: "Could not read how much is still due on the invoice/bill, so nothing was written." };
+    }
+
+    try {
+      due = Math.abs(toMinor(target.due_value));
+    } catch (cause) {
+      return { ok: false, error: (cause as Error).message };
+    }
+
+    if (due === 0) {
+      return { ok: false, error: "This invoice/bill has nothing left to pay (it is already paid)." };
+    }
+  }
+
   let magnitude: number;
 
   try {
     if (input.grossValue !== undefined) {
       magnitude = Math.abs(toMinor(input.grossValue));
-    } else if (target?.due_value !== undefined) {
-      magnitude = Math.min(remaining, Math.abs(toMinor(target.due_value)));
     } else {
-      magnitude = remaining;
+      magnitude = due === undefined ? remaining : Math.min(remaining, due);
     }
   } catch (cause) {
     return { ok: false, error: (cause as Error).message };
@@ -223,6 +242,13 @@ export function planReconcile(input: ReconcileInput): ReconcilePlan {
 
   if (magnitude <= 0) {
     return { ok: false, error: "The amount to explain must be greater than zero." };
+  }
+
+  if (due !== undefined && magnitude > due) {
+    return {
+      ok: false,
+      error: `Amount ${fromMinor(magnitude)} exceeds the ${fromMinor(due)} still due on the invoice/bill.`,
+    };
   }
 
   if (magnitude > remaining) {

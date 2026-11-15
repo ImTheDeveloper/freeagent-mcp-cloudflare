@@ -119,7 +119,7 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
     "transition_invoice",
     {
       description:
-        "Changes an invoice's status. mark_as_sent makes a draft a live invoice (it can then be paid) and can re-open a cancelled one; mark_as_draft and mark_as_cancelled reverse it. Does not email the invoice.",
+        "Changes an invoice's status. mark_as_sent makes a draft a live invoice (it can then be paid) and can re-open a cancelled one; mark_as_draft and mark_as_cancelled reverse it. Does not call FreeAgent's send-email endpoint.",
       inputSchema: {
         invoice: z.string().min(1).describe("Invoice id or full invoice URL."),
         transition: z.enum(INVOICE_TRANSITIONS),

@@ -41,6 +41,11 @@ describe("resolveResourceUrl", () => {
     expect(() => resolveResourceUrl("invoices", "https://evil.test/v2/invoices/7", BASE)).toThrow();
     expect(() => resolveResourceUrl("invoices", `${BASE}/v2/bills/7`, BASE)).toThrow();
     expect(() => resolveResourceUrl("invoices", "../x", BASE)).toThrow();
+    expect(() =>
+      resolveResourceUrl("invoices", `${BASE}/v2/invoices/1/../../contacts/5`, BASE),
+    ).toThrow();
+    expect(() => resolveResourceUrl("invoices", `${BASE}/v2/invoices/%2e%2e/x`, BASE)).toThrow();
+    expect(() => resolveResourceUrl("invoices", `${BASE}/v2/invoices/1?x=1`, BASE)).toThrow();
   });
 });
 
@@ -116,6 +121,18 @@ describe("planReconcile", () => {
     expect(
       planReconcile({ transaction: { ...moneyIn, unexplained_amount: "0.0" }, invoice, baseUrl: BASE }),
     ).toMatchObject({ ok: false, error: expect.stringContaining("already") });
+  });
+
+  it("never overpays or guesses when the amount due is unknown", () => {
+    expect(
+      planReconcile({ transaction: moneyIn, invoice, grossValue: 110, baseUrl: BASE }),
+    ).toMatchObject({ ok: false, error: expect.stringContaining("still due") });
+    expect(
+      planReconcile({ transaction: moneyIn, invoice: { url: invoice.url }, baseUrl: BASE }),
+    ).toMatchObject({ ok: false, error: expect.stringContaining("still due") });
+    expect(
+      planReconcile({ transaction: moneyIn, invoice: { ...invoice, due_value: "0.0" }, baseUrl: BASE }),
+    ).toMatchObject({ ok: false, error: expect.stringContaining("already paid") });
   });
 
   it("needs exactly one target and rejects foreign currency", () => {
