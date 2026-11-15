@@ -36,7 +36,9 @@
     "WORKER_BASE_URL": "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev",
     "FREEAGENT_MODE": "company",
     "FREEAGENT_API_BASE_URL": "https://api.freeagent.com",
-    "FREEAGENT_USER_AGENT": "freeagent-mcp/0.1.0"
+    "FREEAGENT_USER_AGENT": "freeagent-mcp/0.1.0",
+    "FREEAGENT_ENABLE_WRITES": "false",
+    "FREEAGENT_ENABLE_DELETES": "false"
   },
   "observability": {
     "enabled": true

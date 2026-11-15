@@ -18,6 +18,8 @@ export interface AppEnv {
   FREEAGENT_MODE?: FreeAgentMode;
   FREEAGENT_API_BASE_URL?: string;
   FREEAGENT_USER_AGENT?: string;
+  FREEAGENT_ENABLE_WRITES?: string;
+  FREEAGENT_ENABLE_DELETES?: string;
 }
 
 export function getFreeAgentMode(env: Pick<AppEnv, "FREEAGENT_MODE">): FreeAgentMode {
@@ -30,4 +32,16 @@ export function getFreeAgentApiBaseUrl(env: Pick<AppEnv, "FREEAGENT_API_BASE_URL
 
 export function getFreeAgentUserAgent(env: Pick<AppEnv, "FREEAGENT_USER_AGENT">): string {
   return env.FREEAGENT_USER_AGENT ?? "freeagent-mcp/0.1.0";
+}
+
+/** Write tools are opt-in: only the exact string "true" enables them. */
+export function areWritesEnabled(env: Pick<AppEnv, "FREEAGENT_ENABLE_WRITES">): boolean {
+  return env.FREEAGENT_ENABLE_WRITES === "true";
+}
+
+/** Delete tools need writes enabled as well as their own flag. */
+export function areDeletesEnabled(
+  env: Pick<AppEnv, "FREEAGENT_ENABLE_WRITES" | "FREEAGENT_ENABLE_DELETES">,
+): boolean {
+  return areWritesEnabled(env) && env.FREEAGENT_ENABLE_DELETES === "true";
 }

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Remote MCP server for read-only FreeAgent analysis on Cloudflare Workers.",
+  "description": "Remote MCP server for FreeAgent on Cloudflare Workers. Read-only by default; writes and deletes are opt-in.",
   "scripts": {
     "dev": "wrangler dev",
     "start": "wrangler dev",

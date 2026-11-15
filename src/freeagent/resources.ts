@@ -434,3 +434,23 @@ export function buildPriceListItemsPath(
 export function buildPriceListItemPath(id: string): string {
   return buildResourceIdPath("/v2/price_list_items", id);
 }
+
+export function buildBankTransactionExplanationsPath(
+  options: PaginatedQueryOptions &
+    DateQueryOptions & {
+      bankAccount: string;
+    },
+): string {
+  return buildPathWithQuery("/v2/bank_transaction_explanations", {
+    page: options.page,
+    per_page: options.perPage,
+    bank_account: options.bankAccount,
+    from_date: options.fromDate,
+    to_date: options.toDate,
+    updated_since: options.updatedSince,
+  });
+}
+
+export function buildBankTransactionExplanationPath(id: string): string {
+  return buildResourceIdPath("/v2/bank_transaction_explanations", id);
+}

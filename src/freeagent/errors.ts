@@ -6,7 +6,7 @@ function summarizeBody(body: string): string {
     return "";
   }
 
-  return normalized.length > 300 ? `${normalized.slice(0, 297)}...` : normalized;
+  return normalized.length > 800 ? `${normalized.slice(0, 797)}...` : normalized;
 }
 
 export function formatFreeAgentErrorMessage(errorPrefix: string, cause: unknown): string {

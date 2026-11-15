@@ -388,3 +388,50 @@ export async function listPracticeClients(
 
   return payload.clients ?? [];
 }
+
+/**
+ * Sends a write (POST/PUT/DELETE) to FreeAgent.
+ *
+ * Deliberately never retries: a retry after a timeout or 5xx could create a
+ * duplicate invoice or explanation. Token refresh happens before this call.
+ * Returns `{}` when the response has no body (DELETE, transitions).
+ */
+export async function freeAgentWrite<T = unknown>(
+  method: "POST" | "PUT" | "DELETE",
+  path: string,
+  accessToken: string,
+  env: Pick<AppEnv, "FREEAGENT_API_BASE_URL" | "FREEAGENT_USER_AGENT">,
+  options?: { subdomain?: string; body?: unknown },
+): Promise<{ payload: T | Record<string, never>; location?: string }> {
+  const headers = buildFreeAgentHeaders(accessToken, env, options);
+  let body: string | undefined;
+
+  if (options?.body !== undefined) {
+    headers.set("Content-Type", "application/json");
+    body = JSON.stringify(options.body);
+  }
+
+  const response = await fetch(`${getFreeAgentApiBaseUrl(env)}${path}`, { method, headers, body });
+
+  if (!response.ok) {
+    throw new FreeAgentApiError(
+      `FreeAgent request failed (${response.status})`,
+      response.status,
+      await response.text(),
+      response.headers.get("Retry-After") ? Number(response.headers.get("Retry-After")) : undefined,
+    );
+  }
+
+  const text = await response.text();
+  let payload: T | Record<string, never> = {};
+
+  if (text.trim()) {
+    try {
+      payload = JSON.parse(text) as T;
+    } catch {
+      payload = {};
+    }
+  }
+
+  return { payload, location: response.headers.get("Location") ?? undefined };
+}

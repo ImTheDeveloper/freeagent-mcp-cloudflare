@@ -18,3 +18,7 @@ Please do not open public issues for security-sensitive problems.
 - Use `.dev.vars` locally and `wrangler secret put` for deployed environments.
 - Keep `wrangler.jsonc` placeholders intact in public branches.
 - Rotate secrets immediately if accidental exposure is suspected.
+
+## Write access
+
+The server is read-only by default. Write tools require `FREEAGENT_ENABLE_WRITES="true"` and delete tools additionally require `FREEAGENT_ENABLE_DELETES="true"`. Enable them only on deployments you control, and rely on your MCP client's approval prompts for destructive tools.

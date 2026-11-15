@@ -1,6 +1,6 @@
 # FreeAgent MCP on Cloudflare Workers
 
-Remote MCP server for read-only FreeAgent access, deployed on Cloudflare Workers.
+Remote MCP server for FreeAgent, deployed on Cloudflare Workers. Read-only by default; write and delete tools are opt-in.
 
 ## Features
 
@@ -9,6 +9,7 @@ Remote MCP server for read-only FreeAgent access, deployed on Cloudflare Workers
 - Durable Object-backed auth state with encrypted token storage.
 - Company mode and practice mode support from one codebase.
 - Broad read-only accounting and operational tool surface for analysis workflows.
+- Optional write tools for creating draft invoices and reconciling bank transactions (see Write tools).
 
 Reference docs:
 
@@ -120,7 +121,7 @@ Rules for LLM agents:
 
 - Practice-mode end-to-end validation depends on having a FreeAgent practice sandbox or real practice environment.
 - Some FreeAgent endpoints may behave differently depending on permission level, account type, or enabled product features.
-- This project is intentionally read-only for safety.
+- Read-only by default for safety. Write and delete tools exist but are off unless you enable them (see Write tools).
 
 ## Related Docs
 
@@ -132,3 +133,18 @@ Rules for LLM agents:
 - Security policy: `SECURITY.md`
 - Contribution guide: `CONTRIBUTING.md`
 - License: `LICENSE`
+
+## Write tools (opt-in)
+
+Both flags default to off. Only the exact string `"true"` enables them. Set them as `vars` in your own `wrangler.jsonc`.
+
+| Variable | Enables |
+| --- | --- |
+| `FREEAGENT_ENABLE_WRITES` | `create_contact`, `create_invoice` (always a draft), `transition_invoice` (send / draft / cancel, never emails), `reconcile_bank_transaction`, `update_bank_transaction_explanation` |
+| `FREEAGENT_ENABLE_DELETES` | `delete_bank_transaction_explanation`, `delete_invoice`. Needs `FREEAGENT_ENABLE_WRITES` as well |
+
+`reconcile_bank_transaction` explains a transaction by category, invoice (`paidInvoice`) or bill (`paidBill`). It checks direction, amount and currency first and refuses rather than guess. `delete_bank_transaction_explanation` is the undo.
+
+Every tool is annotated (`readOnlyHint`, `destructiveHint`, `idempotentHint`) so MCP clients can prompt before writes. Writes are never retried automatically, because a retry could create a duplicate. Each result names the company it wrote to. Attachments are not supported yet. Always try writes against a FreeAgent sandbox first by pointing `FREEAGENT_API_BASE_URL` at it. After deploying, reconnect your MCP client so it picks up the new tool list.
+
+Read-only explanation tools (`list_bank_transaction_explanations`, `get_bank_transaction_explanation`) are always available.
