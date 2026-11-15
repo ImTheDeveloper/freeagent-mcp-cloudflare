@@ -88,6 +88,10 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
         "Creates a DRAFT invoice (FreeAgent always creates invoices as drafts). Nothing is sent: use transition_invoice with mark_as_sent afterwards. `contact` is a contact id or URL. Prices are per unit, excluding VAT.",
       inputSchema: {
         contact: z.string().min(1).describe("Contact id or full contact URL."),
+        project: z
+          .string()
+          .optional()
+          .describe("Project id or full project URL to bill against. Must belong to the contact (see list_projects)."),
         datedOn: dateParam.describe("Invoice date, YYYY-MM-DD."),
         paymentTermsInDays: z.number().int().min(0).describe("Days until payment is due."),
         reference: z.string().optional(),

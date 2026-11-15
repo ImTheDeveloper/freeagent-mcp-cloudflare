@@ -54,6 +54,7 @@ describe("request bodies", () => {
     const body = buildCreateInvoiceBody(
       {
         contact: "5",
+        project: "8",
         datedOn: "2026-01-31",
         paymentTermsInDays: 30,
         items: [{ description: "Work", price: 100, quantity: 2, salesTaxRate: 20 }],
@@ -62,6 +63,7 @@ describe("request bodies", () => {
     );
 
     expect(body.invoice.contact).toBe(`${BASE}/v2/contacts/5`);
+    expect(body.invoice.project).toBe(`${BASE}/v2/projects/8`);
     expect(body.invoice.invoice_items[0]).toMatchObject({
       description: "Work",
       price: "100.00",

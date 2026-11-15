@@ -8,6 +8,7 @@ export type WriteResource =
   | "invoices"
   | "bills"
   | "contacts"
+  | "projects"
   | "bank_transactions"
   | "bank_transaction_explanations"
   | "categories"
@@ -72,6 +73,7 @@ export interface InvoiceItemInput {
 
 export interface CreateInvoiceInput {
   contact: string;
+  project?: string;
   datedOn: string;
   paymentTermsInDays: number;
   reference?: string;
@@ -89,6 +91,7 @@ export function buildCreateInvoiceBody(input: CreateInvoiceInput, baseUrl: strin
   return {
     invoice: {
       contact: resolveResourceUrl("contacts", input.contact, baseUrl),
+      project: input.project ? resolveResourceUrl("projects", input.project, baseUrl) : undefined,
       dated_on: input.datedOn,
       payment_terms_in_days: input.paymentTermsInDays,
       reference: input.reference,
