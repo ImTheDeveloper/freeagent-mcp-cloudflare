@@ -825,6 +825,7 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
             body,
           });
         },
+        currentUserUrl: () => this.state.userProfile?.url ?? null,
         companyLabel: () =>
           this.state.mode === "practice"
             ? (this.state.activeSubdomain ?? "unknown client")

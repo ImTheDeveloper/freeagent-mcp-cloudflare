@@ -3,7 +3,10 @@ import { z } from "zod";
 import { formatFreeAgentErrorMessage } from "../freeagent/errors";
 import {
   INVOICE_TRANSITIONS,
+  definedFields,
+  buildCreateBillBody,
   buildCreateContactBody,
+  buildCreateExpenseBody,
   buildCreateInvoiceBody,
   pathFromResourceUrl,
   planReconcile,
@@ -29,6 +32,8 @@ export interface WriteToolDeps {
   ): Promise<{ payload: any; location?: string }>;
   /** Names the books a write lands in, so a wrong-client write is visible. */
   companyLabel(): string;
+  /** URL of the signed-in FreeAgent user, the default owner of new expenses. */
+  currentUserUrl(): string | null;
 }
 
 const moneyParam = z.union([z.string(), z.number()]);
@@ -257,6 +262,238 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
       }),
   );
 
+
+  const taxStatus = z.enum(["TAXABLE", "EXEMPT", "OUT_OF_SCOPE"]);
+
+  /** PUT a partial update, then read the record back so the result shows what is stored. */
+  async function updateResource(
+    resource: "invoices" | "bills" | "expenses" | "contacts",
+    rootKey: string,
+    ref: string,
+    fields: Record<string, unknown>,
+  ): Promise<WriteToolResponse> {
+    const url = resolveResourceUrl(resource, ref, deps.baseUrl);
+    const body = { [rootKey]: definedFields(fields) };
+    await deps.write("PUT", pathFromResourceUrl(url), body);
+    const updated = await deps.get<Record<string, unknown>>(pathFromResourceUrl(url));
+    return ok(deps, { [rootKey]: updated[rootKey] ?? { url } });
+  }
+
+  const optionalProject = z
+    .string()
+    .optional()
+    .describe("Project id or full project URL.");
+
+  server.registerTool(
+    "update_invoice",
+    {
+      description:
+        "Updates a draft or open invoice's header: reference, date, payment terms, comments or project. It does not change line items: delete a draft and recreate it for that.",
+      inputSchema: {
+        invoice: z.string().min(1).describe("Invoice id or full invoice URL."),
+        reference: z.string().optional(),
+        datedOn: dateParam.optional(),
+        paymentTermsInDays: z.number().int().min(0).optional(),
+        comments: z.string().optional(),
+        project: optionalProject,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async (args) =>
+      guarded("Failed to update invoice", () =>
+        updateResource("invoices", "invoice", args.invoice, {
+          reference: args.reference,
+          dated_on: args.datedOn,
+          payment_terms_in_days: args.paymentTermsInDays,
+          comments: args.comments,
+          project: args.project ? resolveResourceUrl("projects", args.project, deps.baseUrl) : undefined,
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "update_contact",
+    {
+      description:
+        "Updates a contact's name, status or postal address. Email and phone are deliberately not editable here.",
+      inputSchema: {
+        contact: z.string().min(1).describe("Contact id or full contact URL."),
+        organisationName: z.string().optional(),
+        firstName: z.string().optional(),
+        lastName: z.string().optional(),
+        status: z.enum(["Active", "Hidden"]).optional(),
+        defaultPaymentTermsInDays: z.number().int().min(0).optional(),
+        address1: z.string().optional(),
+        address2: z.string().optional(),
+        town: z.string().optional(),
+        region: z.string().optional(),
+        postcode: z.string().optional(),
+        country: z.string().optional(),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async ({ contact, ...rest }) =>
+      guarded("Failed to update contact", () =>
+        updateResource("contacts", "contact", contact, {
+          organisation_name: rest.organisationName,
+          first_name: rest.firstName,
+          last_name: rest.lastName,
+          status: rest.status,
+          default_payment_terms_in_days: rest.defaultPaymentTermsInDays,
+          address1: rest.address1,
+          address2: rest.address2,
+          town: rest.town,
+          region: rest.region,
+          postcode: rest.postcode,
+          country: rest.country,
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "create_bill",
+    {
+      description:
+        "Creates a supplier bill (an invoice you owe). Use it when a supplier invoice arrives that has not been paid yet; pay it later with reconcile_bank_transaction and paidBill. Not needed for something already paid by card: reconcile that straight to a category. Each item needs a category (nominal code or URL) and a gross total.",
+      inputSchema: {
+        contact: z.string().min(1).describe("Supplier contact id or URL (create_contact first if new)."),
+        reference: z.string().min(1).describe("The supplier's invoice number."),
+        datedOn: dateParam,
+        dueOn: dateParam.optional(),
+        currency: z.string().length(3).optional(),
+        comments: z.string().optional(),
+        project: optionalProject,
+        items: z
+          .array(
+            z.object({
+              category: z.string().min(1).describe("Nominal code or category URL."),
+              totalValue: moneyParam.describe("Gross total for the item, including VAT."),
+              description: z.string().optional(),
+              salesTaxRate: moneyParam.optional().describe("VAT rate percent, e.g. 20."),
+              salesTaxStatus: taxStatus.optional(),
+            }),
+          )
+          .min(1)
+          .max(40),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    async (args) =>
+      guarded("Failed to create bill", async () => {
+        const body = buildCreateBillBody(args, deps.baseUrl);
+        const { payload, location } = await deps.write("POST", "/v2/bills", body);
+        return ok(deps, { created: payload.bill ?? null, location });
+      }),
+  );
+
+  server.registerTool(
+    "update_bill",
+    {
+      description:
+        "Updates a bill's header: reference, dates, comments or project. It does not change line items: delete and recreate the bill for that.",
+      inputSchema: {
+        bill: z.string().min(1).describe("Bill id or full bill URL."),
+        reference: z.string().optional(),
+        datedOn: dateParam.optional(),
+        dueOn: dateParam.optional(),
+        comments: z.string().optional(),
+        project: optionalProject,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async (args) =>
+      guarded("Failed to update bill", () =>
+        updateResource("bills", "bill", args.bill, {
+          reference: args.reference,
+          dated_on: args.datedOn,
+          due_on: args.dueOn,
+          comments: args.comments,
+          project: args.project ? resolveResourceUrl("projects", args.project, deps.baseUrl) : undefined,
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "create_expense",
+    {
+      description:
+        "Creates an out-of-pocket expense claim for a user. Do NOT use this for something paid from a company bank account or card: reconcile that transaction to a category with reconcile_bank_transaction instead, or it will be counted twice. amount is positive; the sign is handled for you. Mileage is not supported.",
+      inputSchema: {
+        category: z.string().min(1).describe("Nominal code or category URL."),
+        datedOn: dateParam,
+        amount: moneyParam.describe("Gross amount including VAT, positive."),
+        description: z.string().optional(),
+        user: z.string().optional().describe("User id or URL. Defaults to the signed-in user."),
+        currency: z.string().length(3).optional(),
+        salesTaxRate: moneyParam.optional().describe("VAT rate percent, e.g. 20."),
+        salesTaxStatus: taxStatus.optional(),
+        receiptReference: z.string().optional(),
+        project: optionalProject,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    async (args) =>
+      guarded("Failed to create expense", async () => {
+        const user = args.user ?? deps.currentUserUrl();
+
+        if (!user) {
+          return fail("No default user is available: pass `user`.");
+        }
+
+        const body = buildCreateExpenseBody(
+          {
+            user,
+            category: args.category,
+            datedOn: args.datedOn,
+            grossValue: args.amount,
+            description: args.description,
+            currency: args.currency,
+            salesTaxRate: args.salesTaxRate,
+            salesTaxStatus: args.salesTaxStatus,
+            receiptReference: args.receiptReference,
+            project: args.project,
+          },
+          deps.baseUrl,
+        );
+        const { payload, location } = await deps.write("POST", "/v2/expenses", body);
+        return ok(deps, { created: payload.expense ?? null, location });
+      }),
+  );
+
+  server.registerTool(
+    "update_expense",
+    {
+      description:
+        "Updates an expense: category, date, description, amount, VAT, receipt reference or project.",
+      inputSchema: {
+        expense: z.string().min(1).describe("Expense id or full expense URL."),
+        category: z.string().optional().describe("Nominal code or category URL."),
+        datedOn: dateParam.optional(),
+        description: z.string().optional(),
+        amount: moneyParam.optional().describe("Gross amount including VAT, positive."),
+        salesTaxRate: moneyParam.optional(),
+        salesTaxStatus: taxStatus.optional(),
+        receiptReference: z.string().optional(),
+        project: optionalProject,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async (args) =>
+      guarded("Failed to update expense", () =>
+        updateResource("expenses", "expense", args.expense, {
+          category: args.category ? resolveResourceUrl("categories", args.category, deps.baseUrl) : undefined,
+          dated_on: args.datedOn,
+          description: args.description,
+          gross_value:
+            args.amount === undefined ? undefined : (-Math.abs(Number(args.amount))).toFixed(2),
+          sales_tax_rate: args.salesTaxRate === undefined ? undefined : String(args.salesTaxRate),
+          sales_tax_status: args.salesTaxStatus,
+          receipt_reference: args.receiptReference,
+          project: args.project ? resolveResourceUrl("projects", args.project, deps.baseUrl) : undefined,
+        }),
+      ),
+  );
+
   if (!deps.allowDeletes) {
     return;
   }
@@ -292,4 +529,25 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
         return ok(deps, { deleted: url });
       }),
   );
+
+  for (const [resource, tool, label] of [
+    ["bills", "delete_bill", "bill"],
+    ["expenses", "delete_expense", "expense"],
+    ["contacts", "delete_contact", "contact"],
+  ] as const) {
+    server.registerTool(
+      tool,
+      {
+        description: `DESTRUCTIVE. Permanently deletes a ${label}. FreeAgent may refuse if it is in use.`,
+        inputSchema: { [label]: z.string().min(1).describe(`${label} id or full URL.`) },
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+      },
+      async (args: Record<string, string>) =>
+        guarded(`Failed to delete ${label}`, async () => {
+          const url = resolveResourceUrl(resource, args[label] as string, deps.baseUrl);
+          await deps.write("DELETE", pathFromResourceUrl(url));
+          return ok(deps, { deleted: url });
+        }),
+    );
+  }
 }

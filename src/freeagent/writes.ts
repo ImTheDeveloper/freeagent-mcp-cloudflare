@@ -7,6 +7,8 @@
 export type WriteResource =
   | "invoices"
   | "bills"
+  | "expenses"
+  | "users"
   | "contacts"
   | "projects"
   | "bank_transactions"
@@ -284,5 +286,93 @@ export function planReconcile(input: ReconcileInput): ReconcilePlan {
     body: { bank_transaction_explanation: explanation },
     amount: fromMinor(moneyIn ? magnitude : -magnitude),
     remainingUnexplained: fromMinor(remaining - magnitude),
+  };
+}
+
+/** Drops undefined values and fails when nothing is left, so an empty PUT never goes out. */
+export function definedFields(fields: Record<string, unknown>): Record<string, unknown> {
+  const entries = Object.entries(fields).filter(([, value]) => value !== undefined);
+
+  if (entries.length === 0) {
+    throw new Error("Nothing to update: provide at least one field.");
+  }
+
+  return Object.fromEntries(entries);
+}
+
+export interface BillItemInput {
+  category: string;
+  totalValue: string | number;
+  description?: string;
+  salesTaxRate?: string | number;
+  salesTaxStatus?: "TAXABLE" | "EXEMPT" | "OUT_OF_SCOPE";
+}
+
+export interface CreateBillInput {
+  contact: string;
+  reference: string;
+  datedOn: string;
+  dueOn?: string;
+  currency?: string;
+  comments?: string;
+  project?: string;
+  items: BillItemInput[];
+}
+
+export function buildCreateBillBody(input: CreateBillInput, baseUrl: string) {
+  if (input.items.length === 0) {
+    throw new Error("A bill needs at least one item.");
+  }
+
+  return {
+    bill: {
+      contact: resolveResourceUrl("contacts", input.contact, baseUrl),
+      reference: input.reference,
+      dated_on: input.datedOn,
+      due_on: input.dueOn,
+      currency: input.currency,
+      comments: input.comments,
+      project: input.project ? resolveResourceUrl("projects", input.project, baseUrl) : undefined,
+      bill_items: input.items.map((item) => ({
+        category: resolveResourceUrl("categories", item.category, baseUrl),
+        total_value: money(item.totalValue),
+        description: item.description,
+        sales_tax_rate: item.salesTaxRate === undefined ? undefined : String(item.salesTaxRate),
+        sales_tax_status: item.salesTaxStatus,
+      })),
+    },
+  };
+}
+
+export interface CreateExpenseInput {
+  user: string;
+  category: string;
+  datedOn: string;
+  grossValue: string | number;
+  description?: string;
+  currency?: string;
+  ecStatus?: string;
+  salesTaxRate?: string | number;
+  salesTaxStatus?: "TAXABLE" | "EXEMPT" | "OUT_OF_SCOPE";
+  receiptReference?: string;
+  project?: string;
+}
+
+export function buildCreateExpenseBody(input: CreateExpenseInput, baseUrl: string) {
+  return {
+    expense: {
+      user: resolveResourceUrl("users", input.user, baseUrl),
+      category: resolveResourceUrl("categories", input.category, baseUrl),
+      dated_on: input.datedOn,
+      // FreeAgent expects money out as a negative gross value.
+      gross_value: fromMinor(-Math.abs(toMinor(input.grossValue))),
+      description: input.description,
+      currency: input.currency,
+      ec_status: input.ecStatus ?? "UK/Non-EC",
+      sales_tax_rate: input.salesTaxRate === undefined ? undefined : String(input.salesTaxRate),
+      sales_tax_status: input.salesTaxStatus,
+      receipt_reference: input.receiptReference,
+      project: input.project ? resolveResourceUrl("projects", input.project, baseUrl) : undefined,
+    },
   };
 }

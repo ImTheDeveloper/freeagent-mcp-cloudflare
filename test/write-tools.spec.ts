@@ -14,6 +14,7 @@ function setup(allowDeletes: boolean, get: (path: string) => any = () => ({})) {
     get: async (path) => get(path),
     write,
     companyLabel: () => "Test Co",
+    currentUserUrl: () => `${BASE}/v2/users/1`,
   };
   const server = new McpServer({ name: "t", version: "0" });
   registerWriteTools(server, deps);
@@ -38,6 +39,52 @@ describe("registerWriteTools", () => {
     expect(names(without)).not.toContain("delete_bank_transaction_explanation");
     expect(names(withDeletes)).toContain("delete_invoice");
     expect(names(withDeletes)).toContain("delete_bank_transaction_explanation");
+  });
+
+  it("registers the bill, expense and update tools, with deletes gated", async () => {
+    const without = (await (await connect(setup(false).server)).listTools()).tools.map((t) => t.name);
+    const withDeletes = (await (await connect(setup(true).server)).listTools()).tools.map((t) => t.name);
+
+    for (const name of ["create_bill", "update_bill", "create_expense", "update_expense", "update_invoice", "update_contact"]) {
+      expect(without).toContain(name);
+    }
+    for (const name of ["delete_bill", "delete_expense", "delete_contact"]) {
+      expect(without).not.toContain(name);
+      expect(withDeletes).toContain(name);
+    }
+    expect(without).not.toContain("send_invoice_email");
+  });
+
+  it("creates an expense for the signed-in user with a negative gross value", async () => {
+    const { server, write } = setup(false);
+    const client = await connect(server);
+
+    await client.callTool({
+      name: "create_expense",
+      arguments: { category: "285", datedOn: "2026-02-01", amount: 12.5, description: "Hosting" },
+    });
+
+    expect(write).toHaveBeenCalledWith(
+      "POST",
+      "/v2/expenses",
+      expect.objectContaining({
+        expense: expect.objectContaining({
+          user: `${BASE}/v2/users/1`,
+          category: `${BASE}/v2/categories/285`,
+          gross_value: "-12.50",
+        }),
+      }),
+    );
+  });
+
+  it("refuses an empty update without sending anything", async () => {
+    const { server, write } = setup(false);
+    const client = await connect(server);
+
+    const result = await client.callTool({ name: "update_bill", arguments: { bill: "1" } });
+
+    expect(result.isError).toBe(true);
+    expect(write).not.toHaveBeenCalled();
   });
 
   it("annotates writes and marks deletes destructive", async () => {

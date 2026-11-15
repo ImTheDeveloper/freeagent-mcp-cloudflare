@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { areDeletesEnabled, areWritesEnabled } from "../src/env";
 import { freeAgentWrite } from "../src/freeagent/api";
 import {
+  buildCreateBillBody,
   buildCreateContactBody,
   buildCreateInvoiceBody,
   planReconcile,
@@ -71,6 +72,27 @@ describe("request bodies", () => {
       sales_tax_rate: "20",
     });
     expect(body.invoice).not.toHaveProperty("status");
+  });
+
+  it("builds a bill body with category URLs and string totals", () => {
+    const body = buildCreateBillBody(
+      {
+        contact: "5",
+        reference: "INV-1",
+        datedOn: "2026-03-01",
+        items: [{ category: "285", totalValue: 12, salesTaxRate: 20 }],
+      },
+      BASE,
+    );
+
+    expect(body.bill.bill_items[0]).toMatchObject({
+      category: `${BASE}/v2/categories/285`,
+      total_value: "12.00",
+      sales_tax_rate: "20",
+    });
+    expect(() =>
+      buildCreateBillBody({ contact: "5", reference: "x", datedOn: "2026-03-01", items: [] }, BASE),
+    ).toThrow();
   });
 
   it("requires a contact name", () => {

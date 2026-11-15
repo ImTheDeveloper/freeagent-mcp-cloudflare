@@ -140,11 +140,11 @@ Both flags default to off. Only the exact string `"true"` enables them. Set them
 
 | Variable | Enables |
 | --- | --- |
-| `FREEAGENT_ENABLE_WRITES` | `create_contact`, `create_invoice` (always a draft), `transition_invoice` (send / draft / cancel; does not call FreeAgent's send-email endpoint), `reconcile_bank_transaction`, `update_bank_transaction_explanation` |
-| `FREEAGENT_ENABLE_DELETES` | `delete_bank_transaction_explanation`, `delete_invoice`. Needs `FREEAGENT_ENABLE_WRITES` as well |
+| `FREEAGENT_ENABLE_WRITES` | `create_contact`, `create_invoice` (always a draft), `transition_invoice` (send / draft / cancel; does not call FreeAgent's send-email endpoint), `reconcile_bank_transaction`, `update_bank_transaction_explanation`, `update_invoice`, `update_contact` (no email or phone), `create_bill`, `update_bill`, `create_expense`, `update_expense` |
+| `FREEAGENT_ENABLE_DELETES` | `delete_bank_transaction_explanation`, `delete_invoice`, `delete_bill`, `delete_expense`, `delete_contact`. Needs `FREEAGENT_ENABLE_WRITES` as well |
 
 `reconcile_bank_transaction` explains a transaction by category, invoice (`paidInvoice`) or bill (`paidBill`). It checks direction, amount and currency first and refuses rather than guess. `delete_bank_transaction_explanation` is the undo.
 
-Every tool is annotated (`readOnlyHint`, `destructiveHint`, `idempotentHint`) so MCP clients can prompt before writes. Writes are never retried automatically, because a retry could create a duplicate. Each result names the company it wrote to. Attachments are not supported yet. Always try writes against a FreeAgent sandbox first by pointing `FREEAGENT_API_BASE_URL` at it. After deploying, reconnect your MCP client so it picks up the new tool list.
+Every tool is annotated (`readOnlyHint`, `destructiveHint`, `idempotentHint`) so MCP clients can prompt before writes. Writes are never retried automatically, because a retry could create a duplicate. Each result names the company it wrote to. Emailing invoices, user management, bank account creation, mileage claims and file attachments are not supported. Always try writes against a FreeAgent sandbox first by pointing `FREEAGENT_API_BASE_URL` at it. After deploying, reconnect your MCP client so it picks up the new tool list.
 
 Read-only explanation tools (`list_bank_transaction_explanations`, `get_bank_transaction_explanation`) are always available.
