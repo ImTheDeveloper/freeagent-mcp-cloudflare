@@ -236,4 +236,18 @@ describe("registerWriteTools", () => {
     const withDeletes = (await (await connect(setup(true).server)).listTools()).tools.map((t) => t.name);
     expect(withDeletes).toContain("remove_explanation_attachment");
   });
+
+  it("updates the VAT rate on an explanation", async () => {
+    const { server, write } = setup(false);
+    const client = await connect(server);
+
+    await client.callTool({
+      name: "update_bank_transaction_explanation",
+      arguments: { explanation: "7", salesTaxRate: 20, salesTaxStatus: "TAXABLE" },
+    });
+
+    expect(write).toHaveBeenCalledWith("PUT", "/v2/bank_transaction_explanations/7", {
+      bank_transaction_explanation: { sales_tax_rate: "20", sales_tax_status: "TAXABLE" },
+    });
+  });
 });

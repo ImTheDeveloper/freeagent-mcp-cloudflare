@@ -275,13 +275,16 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
     "update_bank_transaction_explanation",
     {
       description:
-        "Updates an existing explanation: its date, description, category, or the marked-for-review flag. To change which invoice/bill it matches, delete it and reconcile again.",
+        "Updates an existing explanation: its date, description, category, VAT (rate, status or exact amount), or the marked-for-review flag. Locked explanations (e.g. already in a filed VAT return) cannot be changed. To change which invoice/bill it matches, delete it and reconcile again.",
       inputSchema: {
         explanation: z.string().min(1).describe("Explanation id or full URL."),
         datedOn: dateParam.optional(),
         description: z.string().optional(),
         category: z.string().optional().describe("Nominal code or category URL."),
         markedForReview: z.boolean().optional(),
+        salesTaxRate: moneyParam.optional().describe("VAT rate percent, e.g. 20 or 0."),
+        salesTaxStatus: z.enum(["TAXABLE", "EXEMPT", "OUT_OF_SCOPE"]).optional(),
+        manualSalesTaxAmount: moneyParam.optional().describe("Exact VAT amount, overriding the rate."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },
@@ -293,6 +296,10 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
           description: args.description,
           category: args.category ? resolveResourceUrl("categories", args.category, deps.baseUrl) : undefined,
           marked_for_review: args.markedForReview,
+          sales_tax_rate: args.salesTaxRate === undefined ? undefined : String(args.salesTaxRate),
+          sales_tax_status: args.salesTaxStatus,
+          manual_sales_tax_amount:
+            args.manualSalesTaxAmount === undefined ? undefined : String(args.manualSalesTaxAmount),
         };
 
         if (Object.values(fields).every((value) => value === undefined)) {
