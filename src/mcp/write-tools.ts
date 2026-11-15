@@ -4,11 +4,17 @@ import { formatFreeAgentErrorMessage } from "../freeagent/errors";
 import {
   INVOICE_TRANSITIONS,
   definedFields,
+  ATTACHMENT_CONTENT_TYPES,
+  ATTACHMENT_HEADERS,
+  buildAttachment,
+  buildAttachmentsBody,
   buildCreateBillBody,
   buildCreateContactBody,
   buildCreateExpenseBody,
   buildCreateInvoiceBody,
+  MAX_FILES_PER_CALL,
   pathFromResourceUrl,
+  stripSignedLinks,
   planReconcile,
   resolveResourceUrl,
   type TargetForReconcile,
@@ -24,17 +30,25 @@ export interface WriteToolDeps {
   baseUrl: string;
   /** Registers the delete tools too. */
   allowDeletes: boolean;
-  get<T = any>(path: string): Promise<T>;
+  get<T = any>(path: string, headers?: Record<string, string>): Promise<T>;
   write(
     method: "POST" | "PUT" | "DELETE",
     path: string,
     body?: unknown,
+    headers?: Record<string, string>,
   ): Promise<{ payload: any; location?: string }>;
   /** Names the books a write lands in, so a wrong-client write is visible. */
   companyLabel(): string;
   /** URL of the signed-in FreeAgent user, the default owner of new expenses. */
   currentUserUrl(): string | null;
 }
+
+const fileParam = z.object({
+  fileName: z.string().min(1),
+  contentType: z.enum(ATTACHMENT_CONTENT_TYPES as [string, ...string[]]),
+  dataBase64: z.string().min(1).describe("Raw base64 of the file, no data: prefix. Max 5MB."),
+  description: z.string().optional(),
+});
 
 const moneyParam = z.union([z.string(), z.number()]);
 const dateParam = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD.");
@@ -160,6 +174,11 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
         datedOn: dateParam.optional().describe("Defaults to the transaction date."),
         description: z.string().optional(),
         salesTaxRate: moneyParam.optional().describe("Category matches only, e.g. 20."),
+        attachments: z
+          .array(fileParam)
+          .max(MAX_FILES_PER_CALL)
+          .optional()
+          .describe("Receipt files to attach to the new explanation (PDF, PNG, JPEG or GIF)."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },
@@ -211,17 +230,43 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
           return fail(`Not reconciled: ${plan.error}`);
         }
 
+        // Validate files before anything is written, so a bad file cannot leave a
+        // half-done reconcile behind.
+        const attachmentsBody = args.attachments?.length ? buildAttachmentsBody(args.attachments) : undefined;
+
         const { payload, location } = await deps.write(
           "POST",
           "/v2/bank_transaction_explanations",
           plan.body,
         );
 
+        const created = payload.bank_transaction_explanation as { url?: string } | undefined;
+        let attached: string[] | undefined;
+        let attachmentError: string | undefined;
+
+        if (attachmentsBody && created?.url) {
+          try {
+            await deps.write(
+              "POST",
+              `${pathFromResourceUrl(created.url)}/attachments`,
+              attachmentsBody,
+              ATTACHMENT_HEADERS,
+            );
+            attached = args.attachments?.map((file) => file.fileName);
+          } catch (cause) {
+            attachmentError = formatFreeAgentErrorMessage("Explanation created but attaching files failed", cause);
+          }
+        }
+
         return ok(deps, {
-          explanation: payload.bank_transaction_explanation ?? null,
+          explanation: payload.bank_transaction_explanation
+            ? stripSignedLinks(payload.bank_transaction_explanation)
+            : null,
           location,
           explainedAmount: plan.amount,
           remainingUnexplained: plan.remainingUnexplained,
+          attached,
+          attachmentError,
         });
       }),
   );
@@ -363,6 +408,7 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
         currency: z.string().length(3).optional(),
         comments: z.string().optional(),
         project: optionalProject,
+        attachment: fileParam.optional().describe("One file (PDF, PNG, JPEG or GIF) to attach to the bill."),
         items: z
           .array(
             z.object({
@@ -398,6 +444,7 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
         dueOn: dateParam.optional(),
         comments: z.string().optional(),
         project: optionalProject,
+        attachment: fileParam.optional().describe("Replaces the bill's attached file."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },
@@ -409,6 +456,7 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
           due_on: args.dueOn,
           comments: args.comments,
           project: args.project ? resolveResourceUrl("projects", args.project, deps.baseUrl) : undefined,
+          attachment: args.attachment ? buildAttachment(args.attachment) : undefined,
         }),
       ),
   );
@@ -429,6 +477,7 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
         salesTaxStatus: taxStatus.optional(),
         receiptReference: z.string().optional(),
         project: optionalProject,
+        attachment: fileParam.optional().describe("One receipt file (PDF, PNG, JPEG or GIF) to attach."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },
@@ -452,6 +501,7 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
             salesTaxStatus: args.salesTaxStatus,
             receiptReference: args.receiptReference,
             project: args.project,
+            attachment: args.attachment,
           },
           deps.baseUrl,
         );
@@ -475,6 +525,7 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
         salesTaxStatus: taxStatus.optional(),
         receiptReference: z.string().optional(),
         project: optionalProject,
+        attachment: fileParam.optional().describe("Replaces the expense's attached file."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },
@@ -490,8 +541,34 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
           sales_tax_status: args.salesTaxStatus,
           receipt_reference: args.receiptReference,
           project: args.project ? resolveResourceUrl("projects", args.project, deps.baseUrl) : undefined,
+          attachment: args.attachment ? buildAttachment(args.attachment) : undefined,
         }),
       ),
+  );
+
+  server.registerTool(
+    "attach_files_to_explanation",
+    {
+      description:
+        "Attaches up to 10 files (PDF, PNG, JPEG or GIF, 5MB each) to an existing bank transaction explanation, e.g. a receipt. An explanation holds at most 50 files in total. Existing attachments are kept.",
+      inputSchema: {
+        explanation: z.string().min(1).describe("Explanation id or full URL."),
+        files: z.array(fileParam).min(1).max(MAX_FILES_PER_CALL),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    async ({ explanation, files }) =>
+      guarded("Failed to attach files", async () => {
+        const url = resolveResourceUrl("bank_transaction_explanations", explanation, deps.baseUrl);
+        const body = buildAttachmentsBody(files);
+        const { payload } = await deps.write(
+          "POST",
+          `${pathFromResourceUrl(url)}/attachments`,
+          body,
+          ATTACHMENT_HEADERS,
+        );
+        return ok(deps, { explanation: url, attached: files.map((file) => file.fileName), result: stripSignedLinks(payload) });
+      }),
   );
 
   if (!deps.allowDeletes) {
@@ -527,6 +604,31 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
         const url = resolveResourceUrl("invoices", invoice, deps.baseUrl);
         await deps.write("DELETE", pathFromResourceUrl(url));
         return ok(deps, { deleted: url });
+      }),
+  );
+
+  server.registerTool(
+    "remove_explanation_attachment",
+    {
+      description:
+        "DESTRUCTIVE. Removes one attached file from a bank transaction explanation. Get the attachment URL from list_explanation_attachments.",
+      inputSchema: {
+        explanation: z.string().min(1).describe("Explanation id or full URL."),
+        attachment: z.string().min(1).describe("Attachment id or full attachment URL."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+    },
+    async ({ explanation, attachment }) =>
+      guarded("Failed to remove attachment", async () => {
+        const explanationUrl = resolveResourceUrl("bank_transaction_explanations", explanation, deps.baseUrl);
+        const attachmentUrl = resolveResourceUrl("attachments", attachment, deps.baseUrl);
+        await deps.write(
+          "PUT",
+          `${pathFromResourceUrl(explanationUrl)}/attachments`,
+          { attachments: [{ url: attachmentUrl, _destroy: true }] },
+          ATTACHMENT_HEADERS,
+        );
+        return ok(deps, { removed: attachmentUrl, from: explanationUrl });
       }),
   );
 

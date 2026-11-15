@@ -5,6 +5,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { registerWriteTools, type WriteToolDeps } from "../src/mcp/write-tools";
 
 const BASE = "https://api.example.test";
+const PDF = btoa("%PDF-1.4\n1 0 obj\n");
 
 function setup(allowDeletes: boolean, get: (path: string) => any = () => ({})) {
   const write = vi.fn(async () => ({ payload: { bank_transaction_explanation: { url: "x" } }, location: "loc" }));
@@ -170,5 +171,69 @@ describe("registerWriteTools", () => {
 
     expect(result.isError).toBe(true);
     expect(write).not.toHaveBeenCalled();
+  });
+
+  it("attaches files to an explanation with the versioned header", async () => {
+    const { server, write } = setup(false);
+    const client = await connect(server);
+
+    await client.callTool({
+      name: "attach_files_to_explanation",
+      arguments: {
+        explanation: "7",
+        files: [{ fileName: "r.pdf", contentType: "application/pdf", dataBase64: PDF }],
+      },
+    });
+
+    expect(write).toHaveBeenCalledWith(
+      "POST",
+      "/v2/bank_transaction_explanations/7/attachments",
+      { attachments: [expect.objectContaining({ file_name: "r.pdf", content_type: "application/pdf" })] },
+      { "X-Api-Version": "2026-09-01" },
+    );
+  });
+
+  it("rejects a bad file before writing anything, including on reconcile", async () => {
+    const { server, write } = setup(false);
+    const client = await connect(server);
+
+    const result = await client.callTool({
+      name: "attach_files_to_explanation",
+      arguments: {
+        explanation: "7",
+        files: [{ fileName: "r.pdf", contentType: "image/png", dataBase64: PDF }],
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("sends an inline attachment on create_expense and gates attachment removal on deletes", async () => {
+    const { server, write } = setup(false);
+    const client = await connect(server);
+
+    await client.callTool({
+      name: "create_expense",
+      arguments: {
+        category: "285",
+        datedOn: "2026-02-01",
+        amount: 5,
+        attachment: { fileName: "r.pdf", contentType: "application/pdf", dataBase64: PDF },
+      },
+    });
+
+    expect(write).toHaveBeenCalledWith(
+      "POST",
+      "/v2/expenses",
+      expect.objectContaining({
+        expense: expect.objectContaining({ attachment: expect.objectContaining({ file_name: "r.pdf" }) }),
+      }),
+    );
+
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).not.toContain("remove_explanation_attachment");
+    const withDeletes = (await (await connect(setup(true).server)).listTools()).tools.map((t) => t.name);
+    expect(withDeletes).toContain("remove_explanation_attachment");
   });
 });

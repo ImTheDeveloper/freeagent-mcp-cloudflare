@@ -9,6 +9,7 @@ export type WriteResource =
   | "bills"
   | "expenses"
   | "users"
+  | "attachments"
   | "contacts"
   | "projects"
   | "bank_transactions"
@@ -316,6 +317,7 @@ export interface CreateBillInput {
   currency?: string;
   comments?: string;
   project?: string;
+  attachment?: FileInput;
   items: BillItemInput[];
 }
 
@@ -333,6 +335,7 @@ export function buildCreateBillBody(input: CreateBillInput, baseUrl: string) {
       currency: input.currency,
       comments: input.comments,
       project: input.project ? resolveResourceUrl("projects", input.project, baseUrl) : undefined,
+      attachment: input.attachment ? buildAttachment(input.attachment) : undefined,
       bill_items: input.items.map((item) => ({
         category: resolveResourceUrl("categories", item.category, baseUrl),
         total_value: money(item.totalValue),
@@ -356,6 +359,7 @@ export interface CreateExpenseInput {
   salesTaxStatus?: "TAXABLE" | "EXEMPT" | "OUT_OF_SCOPE";
   receiptReference?: string;
   project?: string;
+  attachment?: FileInput;
 }
 
 export function buildCreateExpenseBody(input: CreateExpenseInput, baseUrl: string) {
@@ -373,6 +377,103 @@ export function buildCreateExpenseBody(input: CreateExpenseInput, baseUrl: strin
       sales_tax_status: input.salesTaxStatus,
       receipt_reference: input.receiptReference,
       project: input.project ? resolveResourceUrl("projects", input.project, baseUrl) : undefined,
+      attachment: input.attachment ? buildAttachment(input.attachment) : undefined,
     },
   };
+}
+
+/**
+ * FreeAgent moves explanation attachments to a dedicated endpoint on
+ * 1 Dec 2026. Sending this version on those calls gives the new behaviour now
+ * and is harmless afterwards.
+ */
+export const ATTACHMENTS_API_VERSION = "2026-09-01";
+export const ATTACHMENT_HEADERS = { "X-Api-Version": ATTACHMENTS_API_VERSION };
+
+/** FreeAgent documents 5MB for expense attachments. The explanation limit is not published. */
+export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+export const MAX_FILES_PER_CALL = 10;
+
+const SIGNATURES: Array<{ type: string; test: (bytes: number[]) => boolean }> = [
+  { type: "application/pdf", test: (b) => b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46 },
+  { type: "image/png", test: (b) => b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 },
+  { type: "image/jpeg", test: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
+  { type: "image/gif", test: (b) => b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 },
+];
+
+export const ATTACHMENT_CONTENT_TYPES = SIGNATURES.map((signature) => signature.type);
+
+export interface FileInput {
+  fileName: string;
+  contentType: string;
+  /** Raw base64 of the file. No `data:` prefix. */
+  dataBase64: string;
+  description?: string;
+}
+
+/**
+ * Validates a file and builds FreeAgent's attachment object. The declared type
+ * must be one FreeAgent accepts and must match the file's own first bytes, so a
+ * mislabelled or non-file payload is rejected before it is sent.
+ */
+export function buildAttachment(file: FileInput): Record<string, string | undefined> {
+  const data = file.dataBase64.replace(/\s+/g, "");
+
+  if (data.startsWith("data:") || !/^[A-Za-z0-9+/]+={0,2}$/.test(data) || data.length % 4 !== 0) {
+    throw new Error(`"${file.fileName}": dataBase64 must be plain base64 of the file (no data: prefix).`);
+  }
+
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  const size = (data.length / 4) * 3 - padding;
+
+  if (size > MAX_ATTACHMENT_BYTES) {
+    throw new Error(`"${file.fileName}" is ${size} bytes; the limit is ${MAX_ATTACHMENT_BYTES}.`);
+  }
+
+  if (!ATTACHMENT_CONTENT_TYPES.includes(file.contentType)) {
+    throw new Error(`"${file.fileName}": contentType must be one of ${ATTACHMENT_CONTENT_TYPES.join(", ")}.`);
+  }
+
+  const head = Array.from(atob(data.slice(0, 16)), (char) => char.charCodeAt(0));
+  const detected = SIGNATURES.find((signature) => signature.test(head));
+
+  if (detected?.type !== file.contentType) {
+    throw new Error(`"${file.fileName}": the file contents do not look like ${file.contentType}.`);
+  }
+
+  return {
+    data,
+    file_name: file.fileName,
+    content_type: file.contentType,
+    description: file.description,
+  };
+}
+
+export function buildAttachmentsBody(files: FileInput[]) {
+  if (files.length === 0) {
+    throw new Error("Provide at least one file.");
+  }
+
+  if (files.length > MAX_FILES_PER_CALL) {
+    throw new Error(`At most ${MAX_FILES_PER_CALL} files per call.`);
+  }
+
+  return { attachments: files.map(buildAttachment) };
+}
+
+/** Removes FreeAgent's signed download links, which embed short-lived credentials. */
+export function stripSignedLinks<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map(stripSignedLinks) as T;
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([key]) => !key.startsWith("content_src"))
+        .map(([key, inner]) => [key, stripSignedLinks(inner)]),
+    ) as T;
+  }
+
+  return value;
 }

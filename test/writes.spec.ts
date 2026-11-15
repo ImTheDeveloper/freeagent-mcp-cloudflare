@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { areDeletesEnabled, areWritesEnabled } from "../src/env";
 import { freeAgentWrite } from "../src/freeagent/api";
 import {
+  buildAttachment,
+  buildAttachmentsBody,
   buildCreateBillBody,
+  stripSignedLinks,
   buildCreateContactBody,
   buildCreateInvoiceBody,
   planReconcile,
@@ -205,5 +208,38 @@ describe("freeAgentWrite", () => {
     spy.mockResolvedValue(new Response("boom", { status: 500 }));
     await expect(freeAgentWrite("POST", "/v2/invoices", "tok", env, { body: {} })).rejects.toThrow();
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+});
+
+const PDF = btoa("%PDF-1.4\n1 0 obj\n");
+const PNG = btoa("\x89PNG\r\n\x1a\n0000");
+
+describe("attachments", () => {
+  it("builds FreeAgent's attachment object for a valid file", () => {
+    expect(
+      buildAttachment({ fileName: "r.pdf", contentType: "application/pdf", dataBase64: PDF, description: "Receipt" }),
+    ).toEqual({ data: PDF, file_name: "r.pdf", content_type: "application/pdf", description: "Receipt" });
+  });
+
+  it("rejects mislabelled, malformed and oversized files", () => {
+    expect(() => buildAttachment({ fileName: "r.pdf", contentType: "image/png", dataBase64: PDF })).toThrow(/do not look like/);
+    expect(() => buildAttachment({ fileName: "r.png", contentType: "image/png", dataBase64: `data:image/png;base64,${PNG}` })).toThrow(/plain base64/);
+    expect(() => buildAttachment({ fileName: "r.txt", contentType: "text/plain", dataBase64: PDF })).toThrow(/contentType/);
+    expect(() =>
+      buildAttachment({ fileName: "big.pdf", contentType: "application/pdf", dataBase64: "A".repeat(8 * 1024 * 1024) }),
+    ).toThrow(/limit/);
+  });
+
+  it("limits files per call", () => {
+    const file = { fileName: "r.pdf", contentType: "application/pdf", dataBase64: PDF };
+    expect(buildAttachmentsBody([file]).attachments).toHaveLength(1);
+    expect(() => buildAttachmentsBody([])).toThrow();
+    expect(() => buildAttachmentsBody(Array.from({ length: 11 }, () => file))).toThrow();
+  });
+
+  it("strips signed download links", () => {
+    expect(
+      stripSignedLinks({ attachments: [{ url: "u", content_src: "https://s3/x?sig=1", content_src_small: "s", file_name: "a" }] }),
+    ).toEqual({ attachments: [{ url: "u", file_name: "a" }] });
   });
 });

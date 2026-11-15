@@ -77,6 +77,12 @@ import {
   type OptionalArgsShape,
   type TextToolResponse,
 } from "./mcp/register-tools";
+import {
+  ATTACHMENT_HEADERS,
+  pathFromResourceUrl,
+  resolveResourceUrl,
+  stripSignedLinks,
+} from "./freeagent/writes";
 import { registerWriteTools } from "./mcp/write-tools";
 import { DEFAULT_SESSION_STATE, type SessionState } from "./types";
 
@@ -814,15 +820,19 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
       registerWriteTools(this.server, {
         baseUrl: getFreeAgentApiBaseUrl(env),
         allowDeletes: areDeletesEnabled(env),
-        get: async (path) => {
+        get: async (path, headers) => {
           const { accessToken } = await this.prepareAuthenticatedContext();
-          return freeAgentGet(path, accessToken, this.getAppEnv(), buildRequestScope(this.state));
+          return freeAgentGet(path, accessToken, this.getAppEnv(), {
+            ...buildRequestScope(this.state),
+            extraHeaders: headers,
+          });
         },
-        write: async (method, path, body) => {
+        write: async (method, path, body, headers) => {
           const { accessToken } = await this.prepareAuthenticatedContext();
           return freeAgentWrite(method, path, accessToken, this.getAppEnv(), {
             ...buildRequestScope(this.state),
             body,
+            extraHeaders: headers,
           });
         },
         currentUserUrl: () => this.state.userProfile?.url ?? null,
@@ -875,6 +885,38 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
           }),
           "Failed to list bank transaction explanations",
         );
+      },
+    );
+
+    this.server.registerTool(
+      "list_explanation_attachments",
+      {
+        description:
+          "Lists the files attached to a bank transaction explanation (name, type, size, URL). Download links are omitted.",
+        inputSchema: { explanation: z.string().min(1).describe("Explanation id or full URL.") },
+        annotations: { readOnlyHint: true },
+      },
+      async ({ explanation }) => {
+        try {
+          const { accessToken } = await this.prepareAuthenticatedContext();
+          const env = this.getAppEnv();
+          const url = resolveResourceUrl(
+            "bank_transaction_explanations",
+            explanation,
+            getFreeAgentApiBaseUrl(env),
+          );
+          const payload = await freeAgentGet<unknown>(
+            `${pathFromResourceUrl(url)}/attachments`,
+            accessToken,
+            env,
+            { ...buildRequestScope(this.state), extraHeaders: ATTACHMENT_HEADERS },
+          );
+          return this.jsonResponse(stripSignedLinks(payload));
+        } catch (cause) {
+          return this.textResponse(
+            formatFreeAgentErrorMessage("Failed to list explanation attachments", cause),
+          );
+        }
       },
     );
 

@@ -70,7 +70,7 @@ function parsePaginationMetadata(response: Response, path: string): PaginationMe
   };
 }
 
-export function buildFreeAgentHeaders(accessToken: string, env: Pick<AppEnv, "FREEAGENT_USER_AGENT">, options?: { subdomain?: string }): Headers {
+export function buildFreeAgentHeaders(accessToken: string, env: Pick<AppEnv, "FREEAGENT_USER_AGENT">, options?: { subdomain?: string; extraHeaders?: Record<string, string> }): Headers {
   const headers = new Headers({
     Authorization: `Bearer ${accessToken}`,
     Accept: "application/json",
@@ -81,6 +81,10 @@ export function buildFreeAgentHeaders(accessToken: string, env: Pick<AppEnv, "FR
     headers.set("X-Subdomain", options.subdomain);
   }
 
+  for (const [name, value] of Object.entries(options?.extraHeaders ?? {})) {
+    headers.set(name, value);
+  }
+
   return headers;
 }
 
@@ -88,7 +92,7 @@ export async function freeAgentGet<T>(
   path: string,
   accessToken: string,
   env: Pick<AppEnv, "FREEAGENT_API_BASE_URL" | "FREEAGENT_USER_AGENT">,
-  options?: { subdomain?: string },
+  options?: { subdomain?: string; extraHeaders?: Record<string, string> },
 ): Promise<T> {
   const { payload } = await freeAgentGetDetailed<T>(path, accessToken, env, options);
   return payload;
@@ -98,7 +102,7 @@ export async function freeAgentGetDetailed<T>(
   path: string,
   accessToken: string,
   env: Pick<AppEnv, "FREEAGENT_API_BASE_URL" | "FREEAGENT_USER_AGENT">,
-  options?: { subdomain?: string },
+  options?: { subdomain?: string; extraHeaders?: Record<string, string> },
 ): Promise<{ payload: T; pagination?: PaginationMetadata }> {
   const response = await fetch(`${getFreeAgentApiBaseUrl(env)}${path}`, {
     headers: buildFreeAgentHeaders(accessToken, env, options),
@@ -401,7 +405,7 @@ export async function freeAgentWrite<T = unknown>(
   path: string,
   accessToken: string,
   env: Pick<AppEnv, "FREEAGENT_API_BASE_URL" | "FREEAGENT_USER_AGENT">,
-  options?: { subdomain?: string; body?: unknown },
+  options?: { subdomain?: string; body?: unknown; extraHeaders?: Record<string, string> },
 ): Promise<{ payload: T | Record<string, never>; location?: string }> {
   const headers = buildFreeAgentHeaders(accessToken, env, options);
   let body: string | undefined;
