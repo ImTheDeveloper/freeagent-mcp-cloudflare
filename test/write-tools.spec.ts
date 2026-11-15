@@ -1,0 +1,253 @@
+import { describe, expect, it, vi } from "vitest";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { registerWriteTools, type WriteToolDeps } from "../src/mcp/write-tools";
+
+const BASE = "https://api.example.test";
+const PDF = btoa("%PDF-1.4\n1 0 obj\n");
+
+function setup(allowDeletes: boolean, get: (path: string) => any = () => ({})) {
+  const write = vi.fn(async () => ({ payload: { bank_transaction_explanation: { url: "x" } }, location: "loc" }));
+  const deps: WriteToolDeps = {
+    baseUrl: BASE,
+    allowDeletes,
+    get: async (path) => get(path),
+    write,
+    companyLabel: () => "Test Co",
+    currentUserUrl: () => `${BASE}/v2/users/1`,
+  };
+  const server = new McpServer({ name: "t", version: "0" });
+  registerWriteTools(server, deps);
+  return { server, write };
+}
+
+async function connect(server: McpServer): Promise<Client> {
+  const [c, s] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "t", version: "0" }, { capabilities: {} });
+  await Promise.all([server.connect(s), client.connect(c)]);
+  return client;
+}
+
+describe("registerWriteTools", () => {
+  it("omits delete tools unless deletes are allowed", async () => {
+    const without = await (await connect(setup(false).server)).listTools();
+    const withDeletes = await (await connect(setup(true).server)).listTools();
+    const names = (r: typeof without) => r.tools.map((t) => t.name);
+
+    expect(names(without)).toContain("reconcile_bank_transaction");
+    expect(names(without)).not.toContain("delete_invoice");
+    expect(names(without)).not.toContain("delete_bank_transaction_explanation");
+    expect(names(withDeletes)).toContain("delete_invoice");
+    expect(names(withDeletes)).toContain("delete_bank_transaction_explanation");
+  });
+
+  it("registers the bill, expense and update tools, with deletes gated", async () => {
+    const without = (await (await connect(setup(false).server)).listTools()).tools.map((t) => t.name);
+    const withDeletes = (await (await connect(setup(true).server)).listTools()).tools.map((t) => t.name);
+
+    for (const name of ["create_bill", "update_bill", "create_expense", "update_expense", "update_invoice", "update_contact"]) {
+      expect(without).toContain(name);
+    }
+    for (const name of ["delete_bill", "delete_expense", "delete_contact"]) {
+      expect(without).not.toContain(name);
+      expect(withDeletes).toContain(name);
+    }
+    expect(without).not.toContain("send_invoice_email");
+  });
+
+  it("creates an expense for the signed-in user with a negative gross value", async () => {
+    const { server, write } = setup(false);
+    const client = await connect(server);
+
+    await client.callTool({
+      name: "create_expense",
+      arguments: { category: "285", datedOn: "2026-02-01", amount: 12.5, description: "Hosting" },
+    });
+
+    expect(write).toHaveBeenCalledWith(
+      "POST",
+      "/v2/expenses",
+      expect.objectContaining({
+        expense: expect.objectContaining({
+          user: `${BASE}/v2/users/1`,
+          category: `${BASE}/v2/categories/285`,
+          gross_value: "-12.50",
+        }),
+      }),
+    );
+  });
+
+  it("refuses an empty update without sending anything", async () => {
+    const { server, write } = setup(false);
+    const client = await connect(server);
+
+    const result = await client.callTool({ name: "update_bill", arguments: { bill: "1" } });
+
+    expect(result.isError).toBe(true);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("annotates writes and marks deletes destructive", async () => {
+    const { tools } = await (await connect(setup(true).server)).listTools();
+    const byName = Object.fromEntries(tools.map((t) => [t.name, t.annotations]));
+
+    expect(byName.create_invoice).toMatchObject({ readOnlyHint: false, destructiveHint: false });
+    expect(byName.delete_invoice).toMatchObject({ destructiveHint: true });
+  });
+
+  it("reconciles an invoice with a single POST and reports the company", async () => {
+    const { server, write } = setup(false, (path) => {
+      if (path.includes("bank_transactions")) {
+        return {
+          bank_transaction: {
+            url: `${BASE}/v2/bank_transactions/1`,
+            amount: "100.00",
+            unexplained_amount: "100.00",
+            dated_on: "2026-02-01",
+            bank_account: `${BASE}/v2/bank_accounts/9`,
+          },
+        };
+      }
+      if (path.includes("invoices")) {
+        return { invoice: { url: `${BASE}/v2/invoices/3`, due_value: "100.00", currency: "GBP" } };
+      }
+      return { bank_account: { currency: "GBP" } };
+    });
+    const client = await connect(server);
+
+    const result = await client.callTool({
+      name: "reconcile_bank_transaction",
+      arguments: { bankTransaction: "1", paidInvoice: "3" },
+    });
+
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(write).toHaveBeenCalledWith(
+      "POST",
+      "/v2/bank_transaction_explanations",
+      expect.objectContaining({
+        bank_transaction_explanation: expect.objectContaining({
+          paid_invoice: `${BASE}/v2/invoices/3`,
+          gross_value: "100.00",
+        }),
+      }),
+    );
+    expect(JSON.stringify(result.content)).toContain("Test Co");
+  });
+
+  it("refuses with a readable error and writes nothing when a check fails", async () => {
+    const { server, write } = setup(false, (path) =>
+      path.includes("bank_transactions")
+        ? {
+            bank_transaction: {
+              url: `${BASE}/v2/bank_transactions/1`,
+              amount: "100.00",
+              unexplained_amount: "0.0",
+              dated_on: "2026-02-01",
+              bank_account: `${BASE}/v2/bank_accounts/9`,
+            },
+          }
+        : { bank_account: { currency: "GBP" } },
+    );
+    const client = await connect(server);
+
+    const result = await client.callTool({
+      name: "reconcile_bank_transaction",
+      arguments: { bankTransaction: "1", category: "285" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("rejects a foreign-host reference before any request", async () => {
+    const { server, write } = setup(true);
+    const client = await connect(server);
+
+    const result = await client.callTool({
+      name: "delete_invoice",
+      arguments: { invoice: "https://evil.test/v2/invoices/1" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("attaches files to an explanation with the versioned header", async () => {
+    const { server, write } = setup(false);
+    const client = await connect(server);
+
+    await client.callTool({
+      name: "attach_files_to_explanation",
+      arguments: {
+        explanation: "7",
+        files: [{ fileName: "r.pdf", contentType: "application/pdf", dataBase64: PDF }],
+      },
+    });
+
+    expect(write).toHaveBeenCalledWith(
+      "POST",
+      "/v2/bank_transaction_explanations/7/attachments",
+      { attachments: [expect.objectContaining({ file_name: "r.pdf", content_type: "application/pdf" })] },
+      { "X-Api-Version": "2026-09-01" },
+    );
+  });
+
+  it("rejects a bad file before writing anything, including on reconcile", async () => {
+    const { server, write } = setup(false);
+    const client = await connect(server);
+
+    const result = await client.callTool({
+      name: "attach_files_to_explanation",
+      arguments: {
+        explanation: "7",
+        files: [{ fileName: "r.pdf", contentType: "image/png", dataBase64: PDF }],
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("sends an inline attachment on create_expense and gates attachment removal on deletes", async () => {
+    const { server, write } = setup(false);
+    const client = await connect(server);
+
+    await client.callTool({
+      name: "create_expense",
+      arguments: {
+        category: "285",
+        datedOn: "2026-02-01",
+        amount: 5,
+        attachment: { fileName: "r.pdf", contentType: "application/pdf", dataBase64: PDF },
+      },
+    });
+
+    expect(write).toHaveBeenCalledWith(
+      "POST",
+      "/v2/expenses",
+      expect.objectContaining({
+        expense: expect.objectContaining({ attachment: expect.objectContaining({ file_name: "r.pdf" }) }),
+      }),
+    );
+
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).not.toContain("remove_explanation_attachment");
+    const withDeletes = (await (await connect(setup(true).server)).listTools()).tools.map((t) => t.name);
+    expect(withDeletes).toContain("remove_explanation_attachment");
+  });
+
+  it("updates the VAT rate on an explanation", async () => {
+    const { server, write } = setup(false);
+    const client = await connect(server);
+
+    await client.callTool({
+      name: "update_bank_transaction_explanation",
+      arguments: { explanation: "7", salesTaxRate: 20, salesTaxStatus: "TAXABLE" },
+    });
+
+    expect(write).toHaveBeenCalledWith("PUT", "/v2/bank_transaction_explanations/7", {
+      bank_transaction_explanation: { sales_tax_rate: "20", sales_tax_status: "TAXABLE" },
+    });
+  });
+});

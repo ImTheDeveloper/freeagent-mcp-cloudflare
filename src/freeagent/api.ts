@@ -70,7 +70,7 @@ function parsePaginationMetadata(response: Response, path: string): PaginationMe
   };
 }
 
-export function buildFreeAgentHeaders(accessToken: string, env: Pick<AppEnv, "FREEAGENT_USER_AGENT">, options?: { subdomain?: string }): Headers {
+export function buildFreeAgentHeaders(accessToken: string, env: Pick<AppEnv, "FREEAGENT_USER_AGENT">, options?: { subdomain?: string; extraHeaders?: Record<string, string> }): Headers {
   const headers = new Headers({
     Authorization: `Bearer ${accessToken}`,
     Accept: "application/json",
@@ -81,6 +81,10 @@ export function buildFreeAgentHeaders(accessToken: string, env: Pick<AppEnv, "FR
     headers.set("X-Subdomain", options.subdomain);
   }
 
+  for (const [name, value] of Object.entries(options?.extraHeaders ?? {})) {
+    headers.set(name, value);
+  }
+
   return headers;
 }
 
@@ -88,7 +92,7 @@ export async function freeAgentGet<T>(
   path: string,
   accessToken: string,
   env: Pick<AppEnv, "FREEAGENT_API_BASE_URL" | "FREEAGENT_USER_AGENT">,
-  options?: { subdomain?: string },
+  options?: { subdomain?: string; extraHeaders?: Record<string, string> },
 ): Promise<T> {
   const { payload } = await freeAgentGetDetailed<T>(path, accessToken, env, options);
   return payload;
@@ -98,7 +102,7 @@ export async function freeAgentGetDetailed<T>(
   path: string,
   accessToken: string,
   env: Pick<AppEnv, "FREEAGENT_API_BASE_URL" | "FREEAGENT_USER_AGENT">,
-  options?: { subdomain?: string },
+  options?: { subdomain?: string; extraHeaders?: Record<string, string> },
 ): Promise<{ payload: T; pagination?: PaginationMetadata }> {
   const response = await fetch(`${getFreeAgentApiBaseUrl(env)}${path}`, {
     headers: buildFreeAgentHeaders(accessToken, env, options),
@@ -387,4 +391,51 @@ export async function listPracticeClients(
   );
 
   return payload.clients ?? [];
+}
+
+/**
+ * Sends a write (POST/PUT/DELETE) to FreeAgent.
+ *
+ * Deliberately never retries: a retry after a timeout or 5xx could create a
+ * duplicate invoice or explanation. Token refresh happens before this call.
+ * Returns `{}` when the response has no body (DELETE, transitions).
+ */
+export async function freeAgentWrite<T = unknown>(
+  method: "POST" | "PUT" | "DELETE",
+  path: string,
+  accessToken: string,
+  env: Pick<AppEnv, "FREEAGENT_API_BASE_URL" | "FREEAGENT_USER_AGENT">,
+  options?: { subdomain?: string; body?: unknown; extraHeaders?: Record<string, string> },
+): Promise<{ payload: T | Record<string, never>; location?: string }> {
+  const headers = buildFreeAgentHeaders(accessToken, env, options);
+  let body: string | undefined;
+
+  if (options?.body !== undefined) {
+    headers.set("Content-Type", "application/json");
+    body = JSON.stringify(options.body);
+  }
+
+  const response = await fetch(`${getFreeAgentApiBaseUrl(env)}${path}`, { method, headers, body });
+
+  if (!response.ok) {
+    throw new FreeAgentApiError(
+      `FreeAgent request failed (${response.status})`,
+      response.status,
+      await response.text(),
+      response.headers.get("Retry-After") ? Number(response.headers.get("Retry-After")) : undefined,
+    );
+  }
+
+  const text = await response.text();
+  let payload: T | Record<string, never> = {};
+
+  if (text.trim()) {
+    try {
+      payload = JSON.parse(text) as T;
+    } catch {
+      payload = {};
+    }
+  }
+
+  return { payload, location: response.headers.get("Location") ?? undefined };
 }

@@ -1,6 +1,6 @@
 # FreeAgent MCP on Cloudflare Workers
 
-Remote MCP server for read-only FreeAgent access, deployed on Cloudflare Workers.
+Remote MCP server for FreeAgent, deployed on Cloudflare Workers. Read-only by default; write and delete tools are opt-in.
 
 ## Features
 
@@ -9,6 +9,7 @@ Remote MCP server for read-only FreeAgent access, deployed on Cloudflare Workers
 - Durable Object-backed auth state with encrypted token storage.
 - Company mode and practice mode support from one codebase.
 - Broad read-only accounting and operational tool surface for analysis workflows.
+- Optional write tools for creating draft invoices and reconciling bank transactions (see Write tools).
 
 Reference docs:
 
@@ -120,7 +121,7 @@ Rules for LLM agents:
 
 - Practice-mode end-to-end validation depends on having a FreeAgent practice sandbox or real practice environment.
 - Some FreeAgent endpoints may behave differently depending on permission level, account type, or enabled product features.
-- This project is intentionally read-only for safety.
+- Read-only by default for safety. Write and delete tools exist but are off unless you enable them (see Write tools).
 
 ## Related Docs
 
@@ -132,3 +133,28 @@ Rules for LLM agents:
 - Security policy: `SECURITY.md`
 - Contribution guide: `CONTRIBUTING.md`
 - License: `LICENSE`
+
+## Write tools (opt-in)
+
+Both flags default to off. Only the exact string `"true"` enables them. Set them as `vars` in your own `wrangler.jsonc`.
+
+| Variable | Enables |
+| --- | --- |
+| `FREEAGENT_ENABLE_WRITES` | `create_contact`, `create_invoice` (always a draft), `transition_invoice` (send / draft / cancel; does not call FreeAgent's send-email endpoint), `reconcile_bank_transaction`, `update_bank_transaction_explanation`, `update_invoice`, `update_contact` (no email or phone), `create_bill`, `update_bill`, `create_expense`, `update_expense`, `attach_files_to_explanation` |
+| `FREEAGENT_ENABLE_DELETES` | `delete_bank_transaction_explanation`, `delete_invoice`, `delete_bill`, `delete_expense`, `delete_contact`, `remove_explanation_attachment`. Needs `FREEAGENT_ENABLE_WRITES` as well |
+
+`reconcile_bank_transaction` explains a transaction by category, invoice (`paidInvoice`) or bill (`paidBill`). It checks direction, amount and currency first and refuses rather than guess. `delete_bank_transaction_explanation` is the undo.
+
+Every tool is annotated (`readOnlyHint`, `destructiveHint`, `idempotentHint`) so MCP clients can prompt before writes. Writes are never retried automatically, because a retry could create a duplicate. Each result names the company it wrote to. Emailing invoices, user management, bank account creation, and mileage claims are not supported. Always try writes against a FreeAgent sandbox first by pointing `FREEAGENT_API_BASE_URL` at it. After deploying, reconnect your MCP client so it picks up the new tool list.
+
+Read-only explanation tools (`list_bank_transaction_explanations`, `get_bank_transaction_explanation`) are always available.
+
+### Attachments
+
+Files are passed as raw base64 in the tool call (`dataBase64`, plus `fileName` and `contentType`; PDF, PNG, JPEG or GIF, 5MB each). The server checks the declared type against the file's own bytes before sending anything, and never fetches remote URLs.
+
+- `reconcile_bank_transaction` accepts `attachments` (up to 10) and attaches them to the new explanation. If attaching fails the explanation still exists and the result says so.
+- `create_expense`, `create_bill`, `update_expense` and `update_bill` accept a single `attachment`.
+- `attach_files_to_explanation` adds files to an existing explanation; `list_explanation_attachments` lists them (download links are omitted); `remove_explanation_attachment` needs the delete flag.
+
+Explanation attachments use FreeAgent's dedicated `/attachments` endpoint with `X-Api-Version: 2026-09-01`, which becomes the default on 1 December 2026. Base64 in a chat tool call is only practical for small files.

@@ -1,7 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent, getMcpAuthContext } from "agents/mcp";
 import { z } from "zod";
-import { getFreeAgentApiBaseUrl, getFreeAgentMode, type AppEnv } from "./env";
+import {
+  areDeletesEnabled,
+  areWritesEnabled,
+  getFreeAgentApiBaseUrl,
+  getFreeAgentMode,
+  type AppEnv,
+} from "./env";
 import { getPrincipalAuthRecord, patchPrincipalAuthRecord } from "./auth/store";
 import { bootstrapAccountContext, switchActiveClientContext } from "./freeagent/context";
 import {
@@ -10,6 +16,7 @@ import {
   freeAgentGet,
   freeAgentGetAllPages,
   freeAgentGetDetailed,
+  freeAgentWrite,
 } from "./freeagent/api";
 import { formatFreeAgentErrorMessage } from "./freeagent/errors";
 import {
@@ -24,6 +31,8 @@ import {
 import {
   buildBankAccountPath,
   buildBankAccountsPath,
+  buildBankTransactionExplanationPath,
+  buildBankTransactionExplanationsPath,
   buildBankTransactionPath,
   buildBankTransactionsPath,
   buildBillPath,
@@ -68,6 +77,13 @@ import {
   type OptionalArgsShape,
   type TextToolResponse,
 } from "./mcp/register-tools";
+import {
+  ATTACHMENT_HEADERS,
+  pathFromResourceUrl,
+  resolveResourceUrl,
+  stripSignedLinks,
+} from "./freeagent/writes";
+import { registerWriteTools } from "./mcp/write-tools";
 import { DEFAULT_SESSION_STATE, type SessionState } from "./types";
 
 const SESSION_INACTIVITY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -98,7 +114,9 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
       content: [
         {
           type: "text" as const,
-          text: "FreeAgent MCP is online in read-only mode.",
+          text: areWritesEnabled(this.getAppEnv())
+            ? "FreeAgent MCP is online. Write tools are enabled."
+            : "FreeAgent MCP is online in read-only mode.",
         },
       ],
     }));
@@ -791,6 +809,124 @@ export class FreeAgentMCP extends McpAgent<any, SessionState> {
         this.readOnlyToolCall(
           buildPriceListItemPath(priceListItemId),
           "Failed to get price list item",
+        ),
+    );
+
+    this.registerExplanationReadTools();
+
+    const env = this.getAppEnv();
+
+    if (areWritesEnabled(env)) {
+      registerWriteTools(this.server, {
+        baseUrl: getFreeAgentApiBaseUrl(env),
+        allowDeletes: areDeletesEnabled(env),
+        get: async (path, headers) => {
+          const { accessToken } = await this.prepareAuthenticatedContext();
+          return freeAgentGet(path, accessToken, this.getAppEnv(), {
+            ...buildRequestScope(this.state),
+            extraHeaders: headers,
+          });
+        },
+        write: async (method, path, body, headers) => {
+          const { accessToken } = await this.prepareAuthenticatedContext();
+          return freeAgentWrite(method, path, accessToken, this.getAppEnv(), {
+            ...buildRequestScope(this.state),
+            body,
+            extraHeaders: headers,
+          });
+        },
+        currentUserUrl: () => this.state.userProfile?.url ?? null,
+        companyLabel: () =>
+          this.state.mode === "practice"
+            ? (this.state.activeSubdomain ?? "unknown client")
+            : (this.state.company?.name ?? this.state.company?.subdomain ?? "unknown company"),
+      });
+    }
+  }
+
+  private registerExplanationReadTools(): void {
+    this.server.registerTool(
+      "list_bank_transaction_explanations",
+      {
+        description:
+          "Lists bank transaction explanations (how transactions were reconciled) for one bank account.",
+        inputSchema: {
+          page: pageParam,
+          perPage: perPageParam,
+          bankAccount: z.string().min(1).describe(
+            "Resource URL, bare numeric id, nominal code, or account name. Resolved automatically.",
+          ),
+          fromDate: z.string().optional().describe("YYYY-MM-DD."),
+          toDate: z.string().optional().describe("YYYY-MM-DD."),
+          updatedSince: z.string().optional(),
+        },
+        annotations: { readOnlyHint: true },
+      },
+      async ({ page, perPage, bankAccount, fromDate, toDate, updatedSince }) => {
+        let resolved: string;
+
+        try {
+          const { accessToken } = await this.prepareAuthenticatedContext();
+          resolved = await this.resolveBankAccountRef(bankAccount, accessToken);
+        } catch (cause) {
+          return this.textResponse(
+            formatFreeAgentErrorMessage("Failed to list bank transaction explanations", cause),
+          );
+        }
+
+        return this.readOnlyListToolCall(
+          buildBankTransactionExplanationsPath({
+            page,
+            perPage,
+            bankAccount: resolved,
+            fromDate,
+            toDate,
+            updatedSince,
+          }),
+          "Failed to list bank transaction explanations",
+        );
+      },
+    );
+
+    this.server.registerTool(
+      "list_explanation_attachments",
+      {
+        description:
+          "Lists the files attached to a bank transaction explanation (name, type, size, URL). Download links are omitted.",
+        inputSchema: { explanation: z.string().min(1).describe("Explanation id or full URL.") },
+        annotations: { readOnlyHint: true },
+      },
+      async ({ explanation }) => {
+        try {
+          const { accessToken } = await this.prepareAuthenticatedContext();
+          const env = this.getAppEnv();
+          const url = resolveResourceUrl(
+            "bank_transaction_explanations",
+            explanation,
+            getFreeAgentApiBaseUrl(env),
+          );
+          const payload = await freeAgentGet<unknown>(
+            `${pathFromResourceUrl(url)}/attachments`,
+            accessToken,
+            env,
+            { ...buildRequestScope(this.state), extraHeaders: ATTACHMENT_HEADERS },
+          );
+          return this.jsonResponse(stripSignedLinks(payload));
+        } catch (cause) {
+          return this.textResponse(
+            formatFreeAgentErrorMessage("Failed to list explanation attachments", cause),
+          );
+        }
+      },
+    );
+
+    this.server.tool(
+      "get_bank_transaction_explanation",
+      { explanationId: z.string().min(1) },
+      async ({ explanationId }) =>
+        this.readOnlyToolCall(
+          buildBankTransactionExplanationPath(explanationId),
+          "Failed to get bank transaction explanation",
         ),
     );
   }
